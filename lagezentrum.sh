@@ -27,12 +27,34 @@ env_set() {
 lxc_ip() { hostname -I 2>/dev/null | awk '{print $1}'; }
 vlq() { curl -fsS --max-time 10 http://127.0.0.1:9428/select/logsql/query --data-urlencode "query=$1"; }
 
+# Einstellungen, die setup aus der Umgebung übernimmt (z. B. von install.sh / create-lxc.sh)
+SETUP_KEYS="WAN_IP LOCAL_EXTRA_NETS ALLOWED_SENDERS LOCAL_SERVER_PORTS IGNORE_IPS HTTP_PORT ALLOWED_CLIENTS HOME_LAT HOME_LON HOME_LABEL GATEWAY_NAME RETENTION MAX_DISK TZ"
+
+GIVEN=" "
+ask() {  # ask KEY "Frage" "Vorschlag"  -> setzt KEY in der .env (nur interaktiv)
+  local key=$1 q=$2 def=$3 ans
+  [[ "$GIVEN" == *" $key "* ]] && return 0    # per Umgebung vorgegeben
+  read -rp "  $q [${def}]: " ans </dev/tty || ans=""
+  ans=${ans:-$def}
+  [ "$ans" = "-" ] && ans=""
+  env_set "$key" "$ans"
+}
+
 cmd_setup() {
   need_docker
+  local fresh=0
   if [ ! -f .env ]; then
     cp .env.example .env
+    fresh=1
     c_ok ".env aus .env.example angelegt"
   fi
+
+  # Werte aus der Umgebung übernehmen (z. B. ALLOWED_SENDERS=10.37.10.1 ./lagezentrum.sh setup)
+  local k
+  for k in $SETUP_KEYS; do
+    if [ -n "${!k+x}" ] && [ -n "${!k}" ]; then env_set "$k" "${!k}"; GIVEN+="$k "; c_ok "$k=${!k} übernommen"; fi
+  done
+
   if [ -z "$(env_get WAN_IP)" ]; then
     wan=$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
     if [[ "$wan" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -41,6 +63,23 @@ cmd_setup() {
       c_warn "Öffentliche IP nicht ermittelbar – WAN_IP in .env bitte selbst setzen"
     fi
   fi
+
+  # Interaktiv nachfragen, wenn die .env neu ist und ein Terminal da ist
+  if [ "$fresh" = 1 ] && [ -z "${LZ_NONINTERACTIVE:-}" ] && { : </dev/tty; } 2>/dev/null; then
+    local gw; gw=$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')
+    echo
+    echo "Ein paar Fragen (Enter = Vorschlag übernehmen, - = leer lassen):"
+    ask WAN_IP "Öffentliche IPv4 des Gateways" "$(env_get WAN_IP)"
+    ask ALLOWED_SENDERS "IP des Gateways, das NetFlow/Syslog schickt" "${gw:--}"
+    ask GATEWAY_NAME "Name des Gateways" "$(env_get GATEWAY_NAME)"
+    ask HOME_LABEL "Standort (Beschriftung auf dem Globus)" "$(env_get HOME_LABEL)"
+    ask HOME_LAT "Breitengrad" "$(env_get HOME_LAT)"
+    ask HOME_LON "Längengrad" "$(env_get HOME_LON)"
+    ask LOCAL_EXTRA_NETS "Eigenes IPv6-Präfix, z. B. 2003:ab:cd00::/56" "$(env_get LOCAL_EXTRA_NETS | grep . || echo -)"
+    ask LOCAL_SERVER_PORTS "Von außen erreichbare Ports (VPN, Freigaben)" "$(env_get LOCAL_SERVER_PORTS)"
+    echo
+  fi
+
   if [ ! -f config/hosts.csv ]; then
     cp config/hosts.example.csv config/hosts.csv
     c_ok "config/hosts.csv angelegt – trag dort deine Geräte ein (IP,Name)"
@@ -63,7 +102,10 @@ EOF
 
   echo "Baue und starte die Container (erster Start lädt ~140 MB GeoIP-Daten) …"
   docker compose build
-  docker compose up -d
+  if ! docker compose up -d; then
+    echo; docker compose logs --no-log-prefix geoip 2>/dev/null | tail -5
+    die "Start fehlgeschlagen. Steht oben „geoip: FEHLER“, hat der LXC kein Internet (DNS/Gateway prüfen), danach erneut: ./lagezentrum.sh setup"
+  fi
   sleep 3
   docker compose ps
   local ip; ip=$(lxc_ip)

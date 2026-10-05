@@ -12,7 +12,7 @@ Bogen über einen 3D-Globus. Dazu Live-Ticker, 24-h-Statistik und eine durchsuch
 ## Inhalt
 
 1. [Aufbau](#aufbau)
-2. [Proxmox: LXC anlegen](#1-proxmox-lxc-anlegen)
+2. [Proxmox: Storage](#1-proxmox-storage-für-die-spare-ssd)
 3. [Installieren](#2-installieren)
 4. [UniFi einrichten](#3-unifi-einrichten)
 5. [Testen](#4-testen)
@@ -54,51 +54,74 @@ alle Downloads). Über die WAN-Grenze gilt die lokale Seite als Client, außer i
 
 ---
 
-## 1. Proxmox: LXC anlegen
+## 1. Proxmox: Storage für die Spare-SSD
 
-Die freie SSD wird ein eigener Storage, damit Logs nie auf der System-SSD landen.
+Einmalig, damit Logs nie auf der System-SSD landen:
 
-1. **SSD prüfen:** Node → Disks. Die Platte muss als ungenutzt gelistet sein (sonst *Wipe Disk* – löscht alles darauf).
-2. **Storage anlegen:** Node → Disks → LVM-Thin → *Create: Thinpool*, Disk wählen, Name `ssd-logs`, *Add Storage* angehakt.
-3. **Template:** local → CT Templates → *Templates* → `debian-13-standard` (oder 12).
-4. **Container erstellen** (*Create CT*):
-   - Hostname `lagezentrum`, *Unprivileged container* an
-   - Disk: Storage `ssd-logs`, 32 GB
-   - CPU 2 Kerne, RAM 1536 MB, Swap 512 MB (das ist eine Obergrenze, kein reservierter Speicher)
-   - Netzwerk `vmbr0`, feste IP oder DHCP-Reservierung im UniFi
-5. **Features:** Container → Options → Features → `nesting` und `keyctl` an, dann starten.
-6. **Docker installieren** (Konsole des Containers):
-
-   ```bash
-   apt update && apt -y upgrade
-   apt -y install curl git cron
-   curl -fsSL https://get.docker.com | sh
-   docker compose version
-   ```
-
-Alle Images gibt es für amd64 und arm64.
+1. Node → Disks: die Platte muss als ungenutzt gelistet sein (sonst *Wipe Disk* – löscht alles darauf).
+2. Node → Disks → LVM-Thin → *Create: Thinpool*, Disk wählen, Name `ssd-logs`, *Add Storage* angehakt.
 
 ---
 
 ## 2. Installieren
 
+### Variante A: alles automatisch (empfohlen)
+
+Auf dem **Proxmox-Host** als root:
+
 ```bash
-git clone https://github.com/ProfessorQuantumUniverse/unifi-HQ.git /opt/lagezentrum
-cd /opt/lagezentrum
-./lagezentrum.sh setup
+apt -y install git
+git clone https://github.com/ProfessorQuantumUniverse/unifi-HQ.git /root/unifi-HQ
+/root/unifi-HQ/proxmox/create-lxc.sh
 ```
 
-`setup` legt `.env` und `config/hosts.csv` an, trägt deine öffentliche IP als `WAN_IP` ein, lädt
-die GeoIP-Datenbanken (~140 MB), richtet das monatliche GeoIP-Update per Cron ein und startet alles.
+Das Skript lädt das aktuelle Debian-Template, legt einen unprivilegierten LXC auf `ssd-logs` an
+(2 Kerne, 1536 MB RAM als Obergrenze, 32 GB, `nesting` + `keyctl`, Start beim Booten), kopiert
+das Projekt hinein und ruft dort `install.sh` auf. Am Ende stehen IP und alle Adressen da.
+Platten fasst es nicht an.
 
-Danach anpassen und mit `docker compose up -d` übernehmen:
+Anpassen per Umgebungsvariablen, z. B. feste IP im VLAN 10 und Gateway-IP vorgeben:
 
-| Datei | Was |
+```bash
+IP=10.37.10.50/24 GW=10.37.10.1 VLAN=10 ALLOWED_SENDERS=10.37.10.1 HOME_LABEL=Frankfurt \
+  /root/unifi-HQ/proxmox/create-lxc.sh
+```
+
+Weitere Optionen: `CTID`, `STORAGE`, `DISK`, `CORES`, `RAM`, `SWAP`, `BRIDGE`, `CT_HOSTNAME` – siehe Kopf des Skripts.
+
+### Variante B: LXC selbst anlegen, dann installieren
+
+1. *Create CT*: Debian 13, *Unprivileged* an, Disk auf `ssd-logs` (32 GB), 2 Kerne, 1536 MB RAM, 512 MB Swap.
+2. Container → Options → Features → `nesting` und `keyctl` an, starten.
+3. In der Konsole des Containers:
+
+   ```bash
+   apt update && apt -y install git
+   git clone https://github.com/ProfessorQuantumUniverse/unifi-HQ.git /opt/lagezentrum
+   /opt/lagezentrum/install.sh
+   ```
+
+`install.sh` installiert die nötigen Pakete und Docker, richtet alles ein, fragt ein paar Werte
+ab (Vorschläge mit Enter übernehmen) und macht zum Schluss einen Selbsttest. Ist das Repo
+öffentlich, geht es auch ohne Klonen:
+`curl -fsSL https://raw.githubusercontent.com/ProfessorQuantumUniverse/unifi-HQ/main/install.sh | bash`.
+Bei einem privaten Repo klonst du mit Token (`https://<token>@github.com/…`) – oder nimmst
+Variante A, die das Projekt vom Host in den Container kopiert.
+
+### Was das Setup abfragt bzw. anlegt
+
+| Wert | Bedeutung |
 |---|---|
-| `.env` | `ALLOWED_SENDERS` = LAN-IP des Gateways (z. B. `10.37.10.1`), `HOME_LAT`/`HOME_LON`/`HOME_LABEL` (Standort auf dem Globus), bei IPv6 dein Präfix in `LOCAL_EXTRA_NETS` (z. B. `2003:ab:cd00::/56`), `LOCAL_SERVER_PORTS` für Portfreigaben/VPN |
-| `config/hosts.csv` | Gerätenamen, eine Zeile pro Gerät: `10.37.10.3,homelable`. Am besten für Geräte mit DHCP-Reservierung. Nach Änderung: `docker compose restart collector` |
+| `WAN_IP` | öffentliche IPv4, wird automatisch ermittelt |
+| `ALLOWED_SENDERS` | IP des Gateways, das NetFlow/Syslog schickt (Vorschlag: Default-Gateway des LXC) |
+| `GATEWAY_NAME`, `HOME_LABEL`, `HOME_LAT`, `HOME_LON` | Name und Standort auf dem Globus |
+| `LOCAL_EXTRA_NETS` | dein IPv6-Präfix, z. B. `2003:ab:cd00::/56` – sonst erscheinen eigene Geräte mit IPv6 als „Fremde“ |
+| `LOCAL_SERVER_PORTS` | von außen erreichbare Ports (Portfreigaben, VPN-Server), Standard `51820` |
 
-Ohne IPv6-Präfix in `LOCAL_EXTRA_NETS` erscheinen eigene Geräte mit IPv6 als „Fremde“.
+Alles landet in `.env` und lässt sich dort jederzeit ändern (danach `docker compose up -d`).
+Gerätenamen trägst du in `config/hosts.csv` ein, eine Zeile pro Gerät: `10.37.10.3,homelable`
+(danach `docker compose restart collector`). `setup` richtet außerdem das monatliche
+GeoIP-Update per Cron ein. Erneut aufrufen ist gefahrlos: `./lagezentrum.sh setup`.
 
 ---
 
@@ -275,6 +298,8 @@ anderes Muster auf, ist das eine Zeile im `blocked`-Transform in `collector/vect
 ```
 docker-compose.yml        Container, Härtung, RAM-Limits, Log-Rotation
 .env.example              Vorlage für .env (setup kopiert sie)
+install.sh                Installation im LXC: Pakete, Docker, Projekt, Setup, Selbsttest
+proxmox/create-lxc.sh     auf dem Proxmox-Host: LXC anlegen und install.sh darin starten
 lagezentrum.sh            setup · test · status · geoip · password · update · logs
 collector/Dockerfile      Vector + GoFlow2 in einem Image
 collector/vector.yaml     Pipeline: Klassifizierung, Syslog-Parser, GeoIP, Senken
