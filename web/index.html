@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark">
+<title>Lagezentrum</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="globe" role="img" aria-label="Weltkarte mit Live-Verbindungen"></div>
+
+<header>
+  <h1>Lagezentrum<small id="gwName"></small></h1>
+  <div class="status" id="status" data-state="connecting"><span class="dot"></span><span id="statusText">Verbinde …</span></div>
+  <div class="filters" role="group" aria-label="Anzeige filtern">
+    <button class="chip" data-f="out" aria-pressed="true"><i class="c-out"></i>Raus</button>
+    <button class="chip" data-f="in" aria-pressed="true"><i class="c-in"></i>Rein</button>
+    <button class="chip" data-f="blocked" aria-pressed="false"><i class="c-blocked"></i>Abgewehrt</button>
+    <button class="chip" data-f="internal" aria-pressed="false"><i class="c-internal"></i>Intern</button>
+    <button class="chip" data-f="dns" aria-pressed="false"><i class="c-mute"></i>DNS</button>
+  </div>
+  <button class="tool" id="openHistory" title="Verlauf durchsuchen (/)">Verlauf</button>
+  <div class="clock" id="clock">--:--:--</div>
+</header>
+
+<aside class="panel" id="left">
+  <h2>Letzte 24 Stunden <span id="statsState"></span></h2>
+  <div class="totals">
+    <button class="total" data-k="out" data-q="dir:out"><b id="t-out">–</b><span>raus <em id="v-out"></em></span></button>
+    <button class="total" data-k="in" data-q="dir:in"><b id="t-in">–</b><span>rein erlaubt <em id="v-in"></em></span></button>
+    <button class="total" data-k="blocked" data-q="dir:blocked"><b id="t-blocked">–</b><span>abgewehrt</span></button>
+    <button class="total" data-k="internal" data-q="dir:internal"><b id="t-internal">–</b><span>zwischen VLANs <em id="v-internal"></em></span></button>
+  </div>
+
+  <section>
+    <h2>Verbindungen pro Stunde</h2>
+    <div class="spark" id="spark"></div>
+    <div class="spark-axis"><span>−24 h</span><span>jetzt</span></div>
+  </section>
+
+  <section data-needs="out">
+    <h2>Wohin dein Traffic geht</h2>
+    <ul class="bars" data-c="out" id="topOrgs"><li class="empty">Noch keine Daten</li></ul>
+  </section>
+
+  <section data-needs="out">
+    <h2>Zielländer</h2>
+    <ul class="bars" data-c="out" id="topCountriesOut"><li class="empty">Noch keine Daten</li></ul>
+  </section>
+
+  <section data-needs="out">
+    <h2>Aktivste Geräte</h2>
+    <ul class="bars" data-c="out" id="topDevices"><li class="empty">Noch keine Daten</li></ul>
+  </section>
+
+  <section data-needs="in">
+    <h2>Rein erlaubt</h2>
+    <ul class="bars" data-c="in" id="topIn"><li class="empty">Nichts – gut so</li></ul>
+  </section>
+
+  <section data-needs="blocked">
+    <h2>Herkunft der Anklopfer</h2>
+    <ul class="bars" data-c="blocked" id="topCountries"><li class="empty">Noch keine Daten</li></ul>
+  </section>
+
+  <section data-needs="blocked">
+    <h2>Gesuchte Dienste</h2>
+    <ul class="bars" data-c="blocked" id="topPorts"><li class="empty">Noch keine Daten</li></ul>
+  </section>
+
+  <section data-needs="internal">
+    <h2>Intern gerade aktiv</h2>
+    <ul id="internal"><li class="empty">Noch nichts gesehen</li></ul>
+  </section>
+
+  <section data-needs="internal">
+    <h2>Intern, 24 h</h2>
+    <ul class="bars" data-c="internal" id="topInternal"><li class="empty">Noch keine Daten</li></ul>
+  </section>
+</aside>
+
+<aside class="panel" id="right">
+  <h2>Live <span id="rate">· 0 pro Minute</span></h2>
+  <ul id="ticker" aria-live="off"></ul>
+  <div class="hint" id="hint" hidden></div>
+</aside>
+
+<div class="drawer" id="history" hidden role="dialog" aria-modal="true" aria-labelledby="historyTitle">
+  <div class="drawer-box">
+    <div class="drawer-head">
+      <h2 id="historyTitle">Verlauf</h2>
+      <a id="vmuiLink" href="select/vmui/" target="_blank" rel="noopener">VictoriaLogs-Oberfläche</a>
+      <button class="tool" id="closeHistory" aria-label="Schließen">✕</button>
+    </div>
+    <form id="searchForm" autocomplete="off">
+      <input id="q" type="search" placeholder="IP, Gerät, Land, Firma, Port … oder LogsQL wie r_country:CN dport:22" aria-label="Suchbegriff">
+      <select id="range" aria-label="Zeitraum">
+        <option value="1h">1 Stunde</option>
+        <option value="24h" selected>24 Stunden</option>
+        <option value="7d">7 Tage</option>
+        <option value="30d">30 Tage</option>
+        <option value="90d">90 Tage</option>
+      </select>
+      <select id="dirSel" aria-label="Richtung">
+        <option value="">alle Richtungen</option>
+        <option value="out">raus</option>
+        <option value="in">rein</option>
+        <option value="blocked">abgewehrt</option>
+        <option value="internal">intern</option>
+      </select>
+      <button type="submit" class="tool primary">Suchen</button>
+    </form>
+    <div class="result-info" id="resultInfo">Suchbegriffe werden im Klartext aller Einträge gesucht. Mit <code>feld:wert</code> geht es gezielt, z. B. <code>local_name:MacBook</code>, <code>dport:443</code>, <code>r_org:"Google LLC"</code>.</div>
+    <div class="table-wrap">
+      <table id="results">
+        <thead><tr><th>Zeit</th><th>Richtung</th><th>Lokal</th><th>Gegenstelle</th><th>Ort</th><th>Dienst</th><th class="num">Daten</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<footer>
+  Klick auf einen Eintrag zoomt hin, auf eine Liste öffnet den Verlauf. IP-Geolokation: <a href="https://db-ip.com" target="_blank" rel="noopener">DB-IP.com</a> (CC BY 4.0)
+</footer>
+
+<script src="vendor/globe.gl.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
