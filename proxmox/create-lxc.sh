@@ -48,12 +48,15 @@ pvesm status -storage "$STORAGE" >/dev/null 2>&1 \
 # --- Template ---------------------------------------------------------------
 echo "Suche Debian-Template …"
 pveam update >/dev/null 2>&1 || warn "pveam update fehlgeschlagen, nutze bekannte Liste"
+# Nur Templates für die Architektur des Hosts (Proxmox listet auch arm64-Templates)
+ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
 TEMPLATE=""
 for v in 13 12; do
-  TEMPLATE=$(pveam available --section system 2>/dev/null | awk -v v="debian-$v-standard" '$2 ~ "^"v {print $2}' | sort -V | tail -1)
+  TEMPLATE=$(pveam available --section system 2>/dev/null \
+    | awk -v v="debian-$v-standard" -v a="_${ARCH}.tar" '$2 ~ "^"v && index($2, a) {print $2}' | sort -V | tail -1)
   [ -n "$TEMPLATE" ] && break
 done
-[ -n "$TEMPLATE" ] || die "Kein Debian-Template gefunden (pveam available --section system)"
+[ -n "$TEMPLATE" ] || die "Kein Debian-Template für $ARCH gefunden (pveam available --section system)"
 if ! pveam list "$TEMPLATE_STORAGE" 2>/dev/null | grep -q "$TEMPLATE"; then
   echo "Lade $TEMPLATE …"
   pveam download "$TEMPLATE_STORAGE" "$TEMPLATE" >/dev/null
@@ -77,7 +80,7 @@ pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$TEMPLATE" \
   --onboot 1 \
   --timezone host \
   --description "Lagezentrum – Live-Weltkarte für UniFi-Flows" >/dev/null
-pct start "$CTID"
+pct start "$CTID" || die "CT $CTID startet nicht. Aufräumen mit: pct destroy $CTID – Details: pct start $CTID --debug"
 ok "CT $CTID läuft"
 
 echo "Warte auf Netzwerk im Container …"
