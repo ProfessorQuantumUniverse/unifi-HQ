@@ -38,7 +38,6 @@
   const params = new URLSearchParams(location.search);
   // ?lite: für schwache Anzeigegeräte (Pi-Kiosk) – ohne Relief, Sterne und mit weniger Bögen
   const lite = params.has('lite');
-  if (lite) CONFIG.arcsPerSecond = 4;
   const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const nf = new Intl.NumberFormat('de-DE');
   const regionNames = (() => { try { return new Intl.DisplayNames(['de'], { type: 'region' }); } catch { return null; } })();
@@ -55,6 +54,14 @@
     set(k, v) { try { localStorage.setItem('lz.' + k, JSON.stringify(v)); } catch {} }
   };
   const lq = s => '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';   // LogsQL-Zeichenkette
+  const fmtDur = ms => { ms = +ms || 0; if (!ms) return ''; if (ms < 1000) return '<1 s'; const s = Math.round(ms / 1000);
+    if (s < 60) return s + ' s'; const m = Math.floor(s / 60); if (m < 60) return m + ' min ' + (s % 60 ? (s % 60) + ' s' : '');
+    return Math.floor(m / 60) + ' h ' + (m % 60) + ' min'; };
+
+  // Benutzer-Einstellungen (Zahnrad oben rechts), pro Browser gespeichert
+  const DEFAULT_SETTINGS = { smooth: true, arcStyle: 'strong', arcRate: 10 };
+  const settings = Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {}));
+  if (lite) settings.arcRate = Math.min(settings.arcRate, 4);
 
   // ---------- Filter ----------
   const DEFAULT_FILTERS = { out: true, in: true, blocked: false, internal: false, dns: false };
@@ -101,7 +108,7 @@
       .showAtmosphere(true).atmosphereColor('#3d7bd9').atmosphereAltitude(0.16)
       .arcStartLat(d => d.sLat).arcStartLng(d => d.sLng).arcEndLat(d => d.eLat).arcEndLng(d => d.eLng)
       .arcColor(d => d.color).arcStroke(d => d.stroke).arcAltitudeAutoScale(0.38)
-      .arcDashLength(0.4).arcDashGap(2).arcDashInitialGap(1).arcDashAnimateTime(CONFIG.flightMs)
+      .arcDashLength(d => d.dash).arcDashGap(d => d.gap).arcDashInitialGap(1).arcDashAnimateTime(CONFIG.flightMs)
       .arcsTransitionDuration(0)
       .ringColor(d => t => rgba(d.color, Math.max(0, 1 - t)))
       .ringMaxRadius(d => d.max).ringPropagationSpeed(d => d.speed).ringRepeatPeriod(d => d.period)
@@ -148,8 +155,8 @@
   }
 
   // Bögen begrenzen: Token-Bucket + gleiche Gegenstelle höchstens alle 3 s
-  let tokens = CONFIG.arcsPerSecond;
-  setInterval(() => { tokens = Math.min(CONFIG.arcsPerSecond, tokens + CONFIG.arcsPerSecond / 10); }, 100);
+  let tokens = settings.arcRate;
+  setInterval(() => { tokens = Math.min(settings.arcRate, tokens + settings.arcRate / 10); }, 100);
   const recentArc = new Map();
 
   function emitArc(e) {
@@ -164,10 +171,17 @@
     const remote = { lat: +e.r_lat, lng: +e.r_lon };
     const s = towardHome ? remote : H, t = towardHome ? H : remote;
     const color = COLORS[e.dir];
-    const arc = { sLat: s.lat, sLng: s.lng, eLat: t.lat, eLng: t.lng, color: [rgba(color, 0.05), color], stroke: e.dir === 'blocked' ? 0.55 : 0.38 };
+    const strong = settings.arcStyle === 'strong';
+    // Dicke nach Datenmenge: 1 KB dünn, 100 MB dick
+    const vol = (e.bytes || 0) + (e.down || 0);
+    const size = Math.min(1, Math.max(0, (Math.log10(vol + 1) - 3) / 5));
+    const stroke = strong ? (e.dir === 'blocked' ? 0.9 : 0.5 + size * 1.3) : (e.dir === 'blocked' ? 0.55 : 0.38);
+    const arc = { sLat: s.lat, sLng: s.lng, eLat: t.lat, eLng: t.lng, stroke,
+      color: strong ? [rgba(color, 0.35), color] : [rgba(color, 0.05), color],
+      dash: strong ? 0.6 : 0.4, gap: strong ? 1.4 : 2 };
     arcs.push(arc); dirty = true;
     setTimeout(() => {
-      const ring = { lat: t.lat, lng: t.lng, color, max: e.dir === 'blocked' ? 3.2 : 1.8, speed: 2.4, period: 99999 };
+      const ring = { lat: t.lat, lng: t.lng, color, max: (e.dir === 'blocked' ? 3.2 : 1.8) * (strong ? 1.4 + size : 1), speed: 2.4, period: 99999 };
       rings.push(ring); dirty = true;
       setTimeout(() => { const i = rings.indexOf(ring); if (i >= 0) rings.splice(i, 1); dirty = true; }, 1400);
     }, CONFIG.flightMs);
@@ -225,13 +239,27 @@
       what.textContent = parts.filter(Boolean).join(' · ');
     }
     li.title = e.rule ? `Regel: ${e.rule}` : '';
-    body.append(where, what);
+    const meta = el('div', 'meta');
+    e.metaEl = meta; renderMeta(e);
+    body.append(where, what, meta);
     li.append(time, body);
     const go = () => { if (e.dir === 'internal') openHistory(`local_ip:${lq(e.local_ip)} remote_ip:${lq(e.remote_ip)}`, 'internal'); else focusOn(e.r_lat, e.r_lon); };
     li.addEventListener('click', go);
     li.addEventListener('dblclick', () => openHistory(`remote_ip:${lq(e.remote_ip)}`, ''));
     li.addEventListener('keydown', ev => { if (ev.key === 'Enter') go(); });
     return li;
+  }
+
+  function renderMeta(e) {
+    if (!e.metaEl) return;
+    const parts = [];
+    if (e.dir !== 'blocked') {
+      parts.push(`↑ ${fmtBytes(e.bytes)}`);
+      if (e.down) parts.push(`↓ ${fmtBytes(e.down)}`);
+    }
+    if (e.duration_ms) parts.push(fmtDur(e.duration_ms));
+    if (e.proto) parts.push(e.proto);
+    e.metaEl.textContent = parts.join(' · ');
   }
 
   setInterval(() => {
@@ -244,7 +272,9 @@
   setInterval(() => {
     const cutoff = Date.now() - 60000;
     while (stamps.length && stamps[0] < cutoff) stamps.shift();
-    $('rate').textContent = `· ${nf.format(stamps.length)} pro Minute`;
+    while (byteStamps.length && byteStamps[0][0] < cutoff) byteStamps.shift();
+    const perMin = byteStamps.reduce((a, b) => a + b[1], 0);
+    $('rate').textContent = `· ${nf.format(stamps.length)} pro Minute · ${fmtBytes(perMin)}/min`;
     $('clock').textContent = new Date().toLocaleTimeString('de-DE');
     if (ws && ws.readyState === 1) {
       const quiet = Date.now() - lastEventAt > 120000;
@@ -265,13 +295,59 @@
   }
   setInterval(renderInternal, 2000);
 
-  function handle(e) {
+  // Eingang: Antwort-Bytes der passenden Anfrage zuordnen, dann (geglättet) abspielen
+  const byteStamps = [];
+  const conns = new Map();                       // Schlüssel -> Anfrage (letzte ~2 min)
+  const connKey = e => `${e.local_ip}|${e.remote_ip}|${e.sport}|${e.dport}|${e.proto}`;
+  const pending = [];                            // Puffer für gleichmäßiges Abspielen
+  let pendingSorted = true;
+  const lags = [];
+  let playDelay = 10000;                         // Startwert, passt sich nach den ersten Paketen an
+
+  function ingest(e) {
     if (!e || !COLORS[e.dir]) return;
-    if (e.leg === 'resp') return;
     e.ts = e.timestamp ? Date.parse(e.timestamp) : Date.now();
     if (!isFinite(e.ts)) e.ts = Date.now();
-    e.dport = +e.dport || 0;
-    lastEventAt = Date.now();
+    e.dport = +e.dport || 0; e.sport = +e.sport || 0;
+    e.bytes = +e.bytes || 0; e.duration_ms = +e.duration_ms || 0;
+    const now = Date.now();
+    lastEventAt = now;
+    byteStamps.push([now, e.bytes]);
+    const key = connKey(e);
+    if (e.leg === 'resp') {
+      const r = conns.get(key);
+      if (r) { r.down = (r.down || 0) + e.bytes; r.duration_ms = Math.max(r.duration_ms, e.duration_ms); renderMeta(r); }
+      return;
+    }
+    e.seen = now;
+    conns.set(key, e);
+    if (conns.size > 4000) for (const [k, v] of conns) { if (now - v.seen > 120000 || conns.size > 3000) conns.delete(k); else break; }
+    if (!settings.smooth) { play(e); return; }
+    lags.push(now - e.ts); if (lags.length > 300) lags.shift();
+    pending.push(e); pendingSorted = false;
+    if (pending.length > 5000) pending.splice(0, pending.length - 5000).forEach(play);
+  }
+
+  // Versatz = 90 % der beobachteten Verzögerung + Reserve; so landet jedes Ereignis
+  // zu seinem echten Zeitpunkt (Ende der Verbindung) + konstantem Versatz auf dem Globus.
+  setInterval(() => {
+    if (!lags.length) return;
+    const sorted = lags.slice().sort((a, b) => a - b);
+    const p90 = sorted[Math.floor(sorted.length * 0.9)];
+    playDelay = Math.max(1000, Math.min(60000, p90 + 800));
+    const info = $('delayInfo'); if (info) info.textContent = settings.smooth ? `Versatz zurzeit ${Math.round(playDelay / 1000)} s` : '';
+  }, 2000);
+
+  setInterval(() => {
+    if (!pending.length) return;
+    if (!pendingSorted) { pending.sort((a, b) => a.ts - b.ts); pendingSorted = true; }
+    const now = Date.now();
+    while (pending.length && pending[0].ts + playDelay <= now) play(pending.shift());
+  }, 50);
+
+  function flushPending() { if (!pendingSorted) pending.sort((a, b) => a.ts - b.ts); pending.splice(0).forEach(play); pendingSorted = true; }
+
+  function play(e) {
     if (e.dir === 'internal') {
       const k = `${e.local_ip}>${e.remote_ip}:${e.dport}`;
       const r = internalSeen.get(k) || { from: e.local_name || e.local_ip, to: e.remote_name || e.remote_ip, port: e.dport, count: 0 };
@@ -285,6 +361,7 @@
     queue.push(e);
     if (e.dir !== 'internal') emitArc(e);
   }
+  const handle = ingest;
 
   // ---------- Statistiken aus VictoriaLogs ----------
   async function vl(q, limit) {
@@ -323,16 +400,21 @@
   });
 
   let hours = { out: [], in: [], blocked: [], internal: [] };
+  let hoursBytes = { out: [], in: [], blocked: [], internal: [] };
+  let sparkMode = store.get('sparkMode', 'hits');
   function renderSpark() {
-    const dirs = ['out', 'in', 'blocked', 'internal'].filter(d => filters[d]);
+    const src = sparkMode === 'bytes' ? hoursBytes : hours;
+    const fmt = sparkMode === 'bytes' ? fmtBytes : (v => nf.format(v));
+    $('sparkTitle').textContent = sparkMode === 'bytes' ? 'Datenmenge pro Stunde' : 'Verbindungen pro Stunde';
+    const dirs = ['out', 'in', 'blocked', 'internal'].filter(d => filters[d] && !(sparkMode === 'bytes' && d === 'blocked'));
     const sums = new Array(24).fill(0);
-    dirs.forEach(d => (hours[d] || []).forEach((v, i) => { sums[i] += v || 0; }));
+    dirs.forEach(d => (src[d] || []).forEach((v, i) => { sums[i] += v || 0; }));
     const max = Math.max(1, ...sums);
     $('spark').replaceChildren(...sums.map((sum, i) => {
       const col = el('div', 'col');
-      col.title = `${23 - i ? '−' + (23 - i) + ' h' : 'aktuelle Stunde'}: ` + dirs.map(d => `${VERB[d]} ${nf.format((hours[d] || [])[i] || 0)}`).join(', ');
+      col.title = `${23 - i ? '−' + (23 - i) + ' h' : 'aktuelle Stunde'}: ` + dirs.map(d => `${VERB[d]} ${fmt((src[d] || [])[i] || 0)}`).join(', ');
       dirs.forEach(d => {
-        const v = (hours[d] || [])[i] || 0;
+        const v = (src[d] || [])[i] || 0;
         if (!v) return;
         const seg = el('i'); seg.style.height = (v / max * 100) + '%'; seg.style.background = COLORS[d];
         col.append(seg);
@@ -355,7 +437,11 @@
       const T = '_time:24h';
       const jobs = {
         totals: vl(`${T} | stats by (dir) count() if (leg:req) as hits, sum(bytes) as bytes`),
-        hours: vl(`${T} leg:req | stats by (_time:1h, dir) count() as hits`),
+        hours: vl(`${T} | stats by (_time:1h, dir) count() if (leg:req) as hits, sum(bytes) as bytes`),
+        uniq: vl(`${T} (dir:out or dir:"in") | stats count_uniq(remote_ip) as r, count_uniq(r_country) as c, count_uniq(local_ip) as l, count_uniq(r_org) as o`),
+        services: vl(`${T} dir:out leg:req | stats by (dport, proto) count() as v | sort by (v desc) | limit 6`),
+        biggest: vl(`${T} dir:out | stats by (local_ip, local_name, r_org, remote_ip) sum(bytes) as v | sort by (v desc) | limit 6`),
+        longest: vl(`${T} dir:out leg:req duration_ms:>0 | stats by (local_ip, local_name, r_org, remote_ip) sum(duration_ms) as v | sort by (v desc) | limit 6`),
         orgs: vl(`${T} dir:out r_org:* | stats by (r_org) sum(bytes) as v | sort by (v desc) | limit 6`),
         cOut: vl(`${T} dir:out leg:req r_country:* | stats by (r_country, r_country_name) count() as v | sort by (v desc) | limit 6`),
         devices: vl(`${T} (dir:out or dir:"in") | stats by (local_ip, local_name) sum(bytes) as v | sort by (v desc) | limit 6`),
@@ -374,12 +460,20 @@
       const t = {}; res.totals.forEach(r => { t[r.dir] = { hits: +r.hits, bytes: +r.bytes }; }); renderTotals(t);
       const hourStart = Math.floor(Date.now() / 3600000) * 3600000;
       hours = { out: new Array(24).fill(0), in: new Array(24).fill(0), blocked: new Array(24).fill(0), internal: new Array(24).fill(0) };
-      res.hours.forEach(r => { const idx = 23 - Math.round((hourStart - Date.parse(r._time)) / 3600000); if (hours[r.dir] && idx >= 0 && idx < 24) hours[r.dir][idx] += +r.hits; });
+      hoursBytes = { out: new Array(24).fill(0), in: new Array(24).fill(0), blocked: new Array(24).fill(0), internal: new Array(24).fill(0) };
+      res.hours.forEach(r => { const idx = 23 - Math.round((hourStart - Date.parse(r._time)) / 3600000);
+        if (hours[r.dir] && idx >= 0 && idx < 24) { hours[r.dir][idx] += +r.hits || 0; hoursBytes[r.dir][idx] += +r.bytes || 0; } });
+      const u = res.uniq[0] || {};
+      $('uniq').textContent = `${fmtNum(u.r)} Ziele · ${fmtNum(u.o)} Firmen · ${fmtNum(u.c)} Länder · ${fmtNum(u.l)} Geräte`;
       renderSpark();
 
       renderBars($('topOrgs'), res.orgs, r => r.r_org, 'v', fmtBytes, r => [`r_org:${lq(r.r_org)}`, 'out']);
       renderBars($('topCountriesOut'), res.cOut, r => `${flag(r.r_country)} ${country(r.r_country, r.r_country_name) || 'unbekannt'}`, 'v', null, r => [`r_country:${lq(r.r_country)}`, 'out']);
       renderBars($('topDevices'), res.devices, r => r.local_name || r.local_ip, 'v', fmtBytes, r => [`local_ip:${lq(r.local_ip)}`, '']);
+      renderBars($('topServices'), res.services, r => `${portName(+r.dport)} ${r.proto || ''}`, 'v', null, r => [`dport:${+r.dport || 0}`, 'out']);
+      const pair = r => `${r.local_name || r.local_ip} → ${r.r_org || r.remote_ip}`;
+      renderBars($('topBiggest'), res.biggest, pair, 'v', fmtBytes, r => [`local_ip:${lq(r.local_ip)} remote_ip:${lq(r.remote_ip)}`, 'out']);
+      renderBars($('topLongest'), res.longest, pair, 'v', fmtDur, r => [`local_ip:${lq(r.local_ip)} remote_ip:${lq(r.remote_ip)}`, 'out']);
       renderBars($('topIn'), res.inbound, r => `${portName(+r.dport)} ${r.proto || ''}`, 'v', null, r => [`dport:${+r.dport || 0}`, 'in'], 'Nichts – gut so');
       if (res.cBlk) renderBars($('topCountries'), res.cBlk, r => `${flag(r.r_country)} ${country(r.r_country, r.r_country_name) || 'unbekannt'}`, 'v', null, r => r.r_country ? [`r_country:${lq(r.r_country)}`, 'blocked'] : null);
       if (res.ports) renderBars($('topPorts'), res.ports, r => portName(+r.dport), 'v', null, r => [`dport:${+r.dport || 0}`, 'blocked']);
@@ -473,7 +567,8 @@
       const tdSvc = el('td', 'mono', `${portName(r.dport)}${r.proto ? ' ' + r.proto : ''}`);
       if (r.rule) tdSvc.title = `Regel: ${r.rule}`;
       const tdBytes = el('td', 'num', r.dir === 'blocked' ? '' : fmtBytes(r.bytes));
-      tr.append(tdTime, tdDir, tdLocal, tdRemote, tdPlace, tdSvc, tdBytes);
+      const tdDur = el('td', 'num', fmtDur(r.duration_ms));
+      tr.append(tdTime, tdDir, tdLocal, tdRemote, tdPlace, tdSvc, tdBytes, tdDur);
       tr.addEventListener('click', () => { if (r.r_lat != null) { closeHistory(); focusOn(r.r_lat, r.r_lon); } });
       return tr;
     }));
@@ -533,7 +628,8 @@
   const rndIp = () => [1 + Math.random() * 222, Math.random() * 255, Math.random() * 255, 1 + Math.random() * 253].map(Math.floor).join('.');
   const jitter = v => v + (Math.random() - .5) * 1.5;
   const demo = { totals: { blocked: { hits: 18342 }, out: { hits: 96210, bytes: 48e9 }, in: { hits: 12, bytes: 3e6 }, internal: { hits: 40118, bytes: 9e9 } },
-    cBlk: new Map(), ports: new Map(), orgs: new Map(), cOut: new Map(), devices: new Map(), log: [] };
+    cBlk: new Map(), ports: new Map(), orgs: new Map(), cOut: new Map(), devices: new Map(), services: new Map(),
+    biggest: new Map(), longest: new Map(), log: [] };
 
   function demoEvent() {
     const roll = Math.random();
@@ -555,10 +651,15 @@
     } else if (roll < 0.86) {
       const d = pickW(DST_OUT, 5), bytes = Math.floor(Math.random() * 2e6), dev = LOCALS[Math.floor(Math.random() * LOCALS.length)];
       const e = { kind: 'flow', dir: 'out', leg: 'req', proto: d[6] === 53 ? 'UDP' : 'TCP', dport: d[6], remote_ip: rndIp(),
-        local_ip: '10.37.10.' + (2 + LOCALS.indexOf(dev)), local_name: dev,
-        r_country: d[0], r_city: d[1], r_lat: d[2], r_lon: d[3], r_org: d[4], bytes };
+        local_ip: '10.37.10.' + (2 + LOCALS.indexOf(dev)), local_name: dev, sport: 40000 + Math.floor(Math.random() * 20000),
+        r_country: d[0], r_city: d[1], r_lat: d[2], r_lon: d[3], r_org: d[4], bytes: Math.floor(bytes / 20),
+        duration_ms: Math.floor(Math.random() ** 3 * 600000) };
+      e.down = Math.random() < 0.15 ? bytes * 60 : bytes;
       handle(e); remember(e);
-      demo.totals.out.hits++; demo.totals.out.bytes += bytes * 6; hours.out[23]++;
+      demo.totals.out.hits++; demo.totals.out.bytes += bytes * 6; hours.out[23]++; hoursBytes.out[23] += bytes * 6;
+      add(demo.services, d[6], 'v', 1, { dport: d[6], proto: e.proto });
+      add(demo.biggest, dev + d[4], 'v', e.down + e.bytes, { local_name: dev, r_org: d[4] });
+      add(demo.longest, dev + d[4], 'v', e.duration_ms, { local_name: dev, r_org: d[4] });
       add(demo.orgs, d[4], 'v', bytes * 6, { r_org: d[4] }); add(demo.cOut, d[0], 'v', 1, { r_country: d[0] });
       add(demo.devices, dev, 'v', bytes * 6, { local_name: dev, local_ip: e.local_ip });
     } else if (roll < 0.995) {
@@ -581,6 +682,10 @@
     renderBars($('topOrgs'), top(demo.orgs), r => r.r_org, 'v', fmtBytes, r => [`r_org:${lq(r.r_org)}`, 'out']);
     renderBars($('topCountriesOut'), top(demo.cOut), r => `${flag(r.r_country)} ${country(r.r_country)}`, 'v', null, r => [`r_country:${r.r_country}`, 'out']);
     renderBars($('topDevices'), top(demo.devices), r => r.local_name, 'v', fmtBytes, r => [`local_ip:${lq(r.local_ip)}`, '']);
+    renderBars($('topServices'), top(demo.services), r => `${portName(r.dport)} ${r.proto}`, 'v');
+    renderBars($('topBiggest'), top(demo.biggest), r => `${r.local_name} → ${r.r_org}`, 'v', fmtBytes);
+    renderBars($('topLongest'), top(demo.longest), r => `${r.local_name} → ${r.r_org}`, 'v', fmtDur);
+    $('uniq').textContent = `${nf.format(demo.orgs.size * 37)} Ziele · ${demo.orgs.size} Firmen · ${demo.cOut.size} Länder · ${LOCALS.length} Geräte`;
     renderBars($('topIn'), [{ dport: 51820, proto: 'UDP', v: demo.totals.in.hits }], r => `${portName(r.dport)} ${r.proto}`, 'v', null, () => ['dport:51820', 'in']);
     renderBars($('topInternal'), INTERNAL.map(([a, b, p], i) => ({ a, b, p, v: 4000 - i * 700 })), r => `${r.a} → ${r.b} · ${portName(r.p)}`, 'v');
     renderSpark();
@@ -596,10 +701,29 @@
     clearTimeout(reconnectTimer);
     try { ws && ws.close(); } catch {}
     hint.hidden = true; setStatus('demo', 'Demo mit Beispieldaten');
-    for (const d of Object.keys(hours)) hours[d] = Array.from({ length: 24 }, () => Math.floor((d === 'out' ? 900 : d === 'blocked' ? 500 : d === 'internal' ? 600 : 1) * (0.5 + Math.random())));
+    for (const d of Object.keys(hours)) {
+      hours[d] = Array.from({ length: 24 }, () => Math.floor((d === 'out' ? 900 : d === 'blocked' ? 500 : d === 'internal' ? 600 : 1) * (0.5 + Math.random())));
+      hoursBytes[d] = hours[d].map(v => d === 'blocked' ? 0 : v * (2e5 + Math.random() * 3e6));
+    }
     const tick = () => { demoEvent(); demoTimer = setTimeout(tick, 120 + Math.random() * 380); };
     tick(); setInterval(demoStats, 2000); demoStats();
   }
+
+  // ---------- Einstellungen ----------
+  const setBox = $('settings');
+  function syncSettingsUi() {
+    $('optSmooth').checked = settings.smooth;
+    $('optStyle').value = settings.arcStyle;
+    $('optRate').value = settings.arcRate; $('optRateVal').textContent = settings.arcRate;
+  }
+  $('openSettings').addEventListener('click', ev => { ev.stopPropagation(); setBox.hidden = !setBox.hidden; syncSettingsUi(); });
+  document.addEventListener('click', ev => { if (!setBox.hidden && !setBox.contains(ev.target)) setBox.hidden = true; });
+  document.addEventListener('keydown', ev => { if (ev.key === 'Escape') setBox.hidden = true; });
+  const saveSettings = () => store.set('settings', settings);
+  $('optSmooth').addEventListener('change', ev => { settings.smooth = ev.target.checked; if (!settings.smooth) flushPending(); saveSettings(); });
+  $('optStyle').addEventListener('change', ev => { settings.arcStyle = ev.target.value; saveSettings(); });
+  $('optRate').addEventListener('input', ev => { settings.arcRate = +ev.target.value; $('optRateVal').textContent = settings.arcRate; saveSettings(); });
+  $('sparkTitle').addEventListener('click', () => { sparkMode = sparkMode === 'bytes' ? 'hits' : 'bytes'; store.set('sparkMode', sparkMode); renderSpark(); });
 
   // ---------- Start ----------
   async function loadConfig() {

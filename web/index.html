@@ -23,6 +23,14 @@
     <button class="chip" data-f="dns" aria-pressed="false"><i class="c-mute"></i>DNS</button>
   </div>
   <button class="tool" id="openHistory" title="Verlauf durchsuchen (/)">Verlauf</button>
+  <button class="tool icon" id="openSettings" title="Einstellungen" aria-label="Einstellungen" aria-controls="settings">⚙</button>
+  <div class="settings" id="settings" hidden role="dialog" aria-label="Einstellungen">
+    <label class="opt"><input type="checkbox" id="optSmooth"> <span><b>Gleichmäßig abspielen</b><br><small>Das Gateway schickt Flows gebündelt. Puffern und im echten Takt abspielen, mit wenigen Sekunden Versatz. <span id="delayInfo"></span></small></span></label>
+    <label class="opt"><span><b>Bögen</b></span>
+      <select id="optStyle"><option value="strong">kräftig, Dicke nach Datenmenge</option><option value="subtle">dezent</option></select></label>
+    <label class="opt"><span><b>Bögen pro Sekunde</b> <span id="optRateVal"></span></span>
+      <input type="range" id="optRate" min="2" max="30" step="1"></label>
+  </div>
   <div class="clock" id="clock">--:--:--</div>
 </header>
 
@@ -34,9 +42,10 @@
     <button class="total" data-k="blocked" data-q="dir:blocked"><b id="t-blocked">–</b><span>abgewehrt</span></button>
     <button class="total" data-k="internal" data-q="dir:internal"><b id="t-internal">–</b><span>zwischen VLANs <em id="v-internal"></em></span></button>
   </div>
+  <div class="uniq" id="uniq"></div>
 
   <section>
-    <h2>Verbindungen pro Stunde</h2>
+    <h2><button class="link" id="sparkTitle" title="Umschalten: Verbindungen / Datenmenge">Verbindungen pro Stunde</button></h2>
     <div class="spark" id="spark"></div>
     <div class="spark-axis"><span>−24 h</span><span>jetzt</span></div>
   </section>
@@ -49,6 +58,21 @@
   <section data-needs="out">
     <h2>Zielländer</h2>
     <ul class="bars" data-c="out" id="topCountriesOut"><li class="empty">Noch keine Daten</li></ul>
+  </section>
+
+  <section data-needs="out">
+    <h2>Dienste</h2>
+    <ul class="bars" data-c="out" id="topServices"><li class="empty">Noch keine Daten</li></ul>
+  </section>
+
+  <section data-needs="out">
+    <h2>Größte Verbindungen <span>Gerät → Ziel</span></h2>
+    <ul class="bars" data-c="out" id="topBiggest"><li class="empty">Noch keine Daten</li></ul>
+  </section>
+
+  <section data-needs="out">
+    <h2>Längste Verbindungen <span>Gesamtdauer</span></h2>
+    <ul class="bars" data-c="out" id="topLongest"><li class="empty">Noch keine Daten</li></ul>
   </section>
 
   <section data-needs="out">
@@ -116,7 +140,7 @@
     <div class="result-info" id="resultInfo">Suchbegriffe werden im Klartext aller Einträge gesucht. Mit <code>feld:wert</code> geht es gezielt, z. B. <code>local_name:MacBook</code>, <code>dport:443</code>, <code>r_org:"Google LLC"</code>.</div>
     <div class="table-wrap">
       <table id="results">
-        <thead><tr><th>Zeit</th><th>Richtung</th><th>Lokal</th><th>Gegenstelle</th><th>Ort</th><th>Dienst</th><th class="num">Daten</th></tr></thead>
+        <thead><tr><th>Zeit</th><th>Richtung</th><th>Lokal</th><th>Gegenstelle</th><th>Ort</th><th>Dienst</th><th class="num">Daten</th><th class="num">Dauer</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>

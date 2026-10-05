@@ -110,6 +110,7 @@ section { margin-bottom: 20px; }
 #ticker .where { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #ticker .what { font: 12.5px var(--mono); color: var(--mute); overflow-wrap: anywhere; }
 #ticker .verb { font-size: 12.5px; }
+#ticker .meta { font: 12px var(--mono); color: var(--text); opacity: .75; margin-top: 1px; }
 #ticker li[data-dir="blocked"] .verb { color: var(--blocked); }
 #ticker li[data-dir="out"] .verb { color: var(--out); }
 #ticker li[data-dir="in"] .verb { color: var(--in); }
@@ -169,3 +170,17 @@ footer a { color: var(--mute); }
 @media (prefers-reduced-motion: reduce) {
   .status[data-state="live"] .dot, #ticker li.fresh { animation: none; }
 }
+
+/* Einstellungen */
+.tool.icon { padding: 4px 10px; font-size: 16px; line-height: 1; }
+.settings { position: absolute; top: calc(52px + env(safe-area-inset-top, 0px)); right: 20px; z-index: 8; width: 320px;
+  background: var(--panel-solid); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; display: grid; gap: 14px; }
+.settings .opt { display: grid; gap: 6px; font-size: 14px; cursor: pointer; }
+.settings .opt:first-child { grid-template-columns: auto 1fr; align-items: start; }
+.settings small { color: var(--mute); font-size: 12.5px; }
+.settings select { background: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px; }
+.settings input[type=range] { width: 100%; accent-color: var(--out); }
+.settings input[type=checkbox] { accent-color: var(--out); margin-top: 3px; }
+.uniq { color: var(--mute); font: 12px var(--mono); margin: -8px 0 18px; }
+button.link { background: none; border: 0; padding: 0; font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline dotted var(--line); text-underline-offset: 3px; }
+@media (max-width: 900px) { .settings { right: 16px; left: 16px; width: auto; } }
