@@ -22,7 +22,7 @@ enrichment_tables:
   hosts:
     type: file
     file:
-      path: /etc/vector/hosts.csv
+      path: /etc/vector/config/hosts.csv
       encoding:
         type: csv
     schema:
@@ -186,7 +186,10 @@ transforms:
         "dport": srvport,
         "bytes": (int(f.bytes) ?? 0) * rate,
         "packets": (int(f.packets) ?? 0) * rate,
-        "duration_ms": dur
+        "duration_ms": dur,
+        # Diagnose: Interface-Nummern des Gateways (welche Wege exportiert UniFi?)
+        "in_if": int(f.in_if) ?? 0,
+        "out_if": int(f.out_if) ?? 0
       }
 
   blocked:
@@ -336,10 +339,9 @@ transforms:
           .r_asn = a.autonomous_system_number
           .r_org = a.autonomous_system_organization
         }
-      } else {
-        h2, err = get_enrichment_table_record("hosts", {"ip": remote})
-        if err == null { .remote_name = h2.name }
       }
+      h2, err = get_enrichment_table_record("hosts", {"ip": remote})
+      if err == null { .remote_name = h2.name }
 
       h, err = get_enrichment_table_record("hosts", {"ip": local})
       if err == null {
