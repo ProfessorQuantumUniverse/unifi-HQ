@@ -1,0 +1,7 @@
+# persönliche Einstellungen
+/.env
+/config/hosts.csv
+/caddy/auth/*.caddy
+# heruntergeladene GeoIP-Datenbanken
+/geoip/*
+!/geoip/.gitkeep

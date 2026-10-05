@@ -1,0 +1,398 @@
+# Lagezentrum – Vector-Pipeline
+#
+#   UCG Max ──IPFIX──> GoFlow2 (Kindprozess) ──┐
+#   UCG Max ──Syslog─> socket 5514 ────────────┼─> klassifizieren ─> GeoIP/ASN/Namen ─┬─> VictoriaLogs (Historie)
+#                                              │                                     └─> WebSocket 127.0.0.1:8090 (live)
+#
+# Einstellungen kommen zur Laufzeit per get_env_var() aus der .env, damit
+# Sonderzeichen im VRL-Code nie mit der Umgebungs-Interpolation kollidieren.
+
+data_dir: /var/lib/vector
+
+api:
+  enabled: false
+
+enrichment_tables:
+  geo:
+    type: mmdb
+    path: /geoip/dbip-city-lite.mmdb
+  asn:
+    type: mmdb
+    path: /geoip/dbip-asn-lite.mmdb
+  hosts:
+    type: file
+    file:
+      path: /etc/vector/hosts.csv
+      encoding:
+        type: csv
+    schema:
+      ip: string
+      name: string
+
+sources:
+  # GoFlow2 als Kindprozess: stdout = Flows als JSON, stderr = eigene Logs
+  netflow:
+    type: exec
+    mode: streaming
+    command:
+      - /usr/local/bin/goflow2
+      - "-listen=netflow://:2055?count=1&workers=1&queue_size=20000"
+      - -format=json
+      - -addr=127.0.0.1:8091
+      - -loglevel=warn
+    streaming:
+      respawn_on_exit: true
+      respawn_interval_secs: 5
+    include_stderr: true
+    maximum_buffer_size_bytes: 1048576
+
+  # Syslog/SIEM des UCG Max (Firewall-Logs und CEF-Events)
+  unifi_syslog:
+    type: socket
+    mode: udp
+    address: 0.0.0.0:5514
+    max_length: 16384
+
+transforms:
+  # GoFlow2-Statusmeldungen ins Vector-Log (docker compose logs collector)
+  goflow_log:
+    type: remap
+    inputs: [netflow]
+    drop_on_abort: true
+    source: |
+      if .stream != "stderr" { abort }
+      . = { "message": "goflow2: " + (string(.message) ?? "") }
+
+  flows:
+    type: remap
+    inputs: [netflow]
+    drop_on_abort: true
+    source: |
+      if .stream != "stdout" { abort }
+      f, err = parse_json(string(.message) ?? "")
+      if err != null || !is_object(f) { abort }
+
+      # --- Absender prüfen: nur das Gateway darf Flows liefern ---
+      sender = string(f.sampler_address) ?? ""
+      allowed = []
+      for_each(split(get_env_var("ALLOWED_SENDERS") ?? "", ",")) -> |_i, v| {
+        v = strip_whitespace(v)
+        if v != "" {
+          if !contains(v, "/") { if contains(v, ":") { v = v + "/128" } else { v = v + "/32" } }
+          allowed = push(allowed, v)
+        }
+      }
+      if length(allowed) == 0 {
+        allowed = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7", "fe80::/10"]
+      }
+      # Loopback immer (Selbsttest per ./lagezentrum.sh test; aus dem Netz nicht fälschbar)
+      allowed = append(allowed, ["127.0.0.0/8", "::1/128"])
+      if !(ip_cidr_contains(allowed, sender) ?? false) { abort }
+
+      src = string(f.src_addr) ?? ""
+      dst = string(f.dst_addr) ?? ""
+      if src == "" || dst == "" { abort }
+      sp = int(f.src_port) ?? 0
+      dp = int(f.dst_port) ?? 0
+
+      # Multicast, Broadcast, unbestimmte Adressen
+      noise = ["224.0.0.0/4", "255.255.255.255/32", "0.0.0.0/32", "ff00::/8", "::/128"]
+      if (ip_cidr_contains(noise, dst) ?? false) || (ip_cidr_contains(noise, src) ?? false) { abort }
+
+      # Bewusst ignorierte Adressen (z. B. der LXC selbst)
+      ignore = compact(map_values(split(get_env_var("IGNORE_IPS") ?? "", ",")) -> |v| { strip_whitespace(v) })
+      if includes(ignore, src) || includes(ignore, dst) { abort }
+
+      # Vom Gateway verworfene Pakete (IPFIX forwardingStatus 128–191) sind keine erlaubten Flows
+      fs = int(f.forwarding_status) ?? 0
+      if fs >= 128 && fs < 192 { abort }
+
+      nets = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
+              "169.254.0.0/16", "127.0.0.0/8", "fc00::/7", "fe80::/10", "::1/128"]
+      extra = compact(map_values(split(get_env_var("LOCAL_EXTRA_NETS") ?? "", ",")) -> |v| { strip_whitespace(v) })
+      nets = append(nets, extra)
+      wans = compact(map_values(split(get_env_var("WAN_IP") ?? "", ",")) -> |v| { strip_whitespace(v) })
+      src_local = includes(wans, src) || (ip_cidr_contains(nets, src) ?? false)
+      dst_local = includes(wans, dst) || (ip_cidr_contains(nets, dst) ?? false)
+
+      # NetFlow ist unidirektional: jede Verbindung kommt als Anfrage (Client -> Server)
+      # und als Antwort (Server -> Client). Ergebnis: dir = Richtung der Verbindung,
+      # leg = req/resp, sport = Client-Port, dport = Server-Port.
+      # Antworten zählen beim Datenvolumen mit, erscheinen aber nicht live.
+      server_ports = []
+      for_each(split(get_env_var("LOCAL_SERVER_PORTS") ?? "", ",")) -> |_i, v| {
+        n = to_int(strip_whitespace(v)) ?? 0
+        if n > 0 { server_ports = push(server_ports, n) }
+      }
+
+      dir = "out"
+      leg = "req"
+      local = src
+      remote = dst
+      cport = sp
+      srvport = dp
+      if src_local != dst_local {
+        # Über die WAN-Grenze: im Zweifel ist die lokale Seite der Client.
+        # Lokaler Server nur bei eingetragenem Dienst-Port (LOCAL_SERVER_PORTS)
+        # oder klassischem Muster (lokaler Port < 1024, Gegenseite >= 1024).
+        lport = dp
+        rport = sp
+        local = dst
+        remote = src
+        if src_local { lport = sp; rport = dp; local = src; remote = dst }
+        local_server = includes(server_ports, lport) || (lport != 0 && lport < 1024 && rport >= 1024)
+        if local_server {
+          dir = "in"; cport = rport; srvport = lport
+          if src_local { leg = "resp" }
+        } else {
+          dir = "out"; cport = lport; srvport = rport
+          if dst_local { leg = "resp" }
+        }
+      } else {
+        # Intern (beide lokal) oder keine Seite erkennbar lokal (z. B. nach WAN-IP-Wechsel):
+        # der kleinere Port ist der Server-Port.
+        if src_local { dir = "internal" } else { dir = "out" }
+        if sp != 0 && dp != 0 && sp < dp {
+          leg = "resp"; local = dst; remote = src; cport = dp; srvport = sp
+        }
+      }
+
+      # Zeitpunkt: Flow-Ende laut Gateway, sonst Empfangszeit
+      t = now()
+      te = int(f.time_flow_end_ns) ?? 0
+      if te > 0 {
+        ft = from_unix_timestamp(te, unit: "nanoseconds") ?? now()
+        if abs(to_unix_timestamp(ft) - to_unix_timestamp(now())) < 3600 { t = ft }
+      }
+
+      rate = int(f.sampling_rate) ?? 1
+      if rate < 1 { rate = 1 }
+      proto = string(f.proto) ?? (to_string(f.proto) ?? "")
+
+      . = {
+        "timestamp": t,
+        "kind": "flow",
+        "dir": dir,
+        "leg": leg,
+        "proto": upcase(proto),
+        "local_ip": local,
+        "remote_ip": remote,
+        "sport": cport,
+        "dport": srvport,
+        "bytes": (int(f.bytes) ?? 0) * rate,
+        "packets": (int(f.packets) ?? 0) * rate
+      }
+
+  blocked:
+    type: remap
+    inputs: [unifi_syslog]
+    drop_on_abort: true
+    source: |
+      # --- Absender prüfen ---
+      sender = string(.host) ?? ""
+      allowed = []
+      for_each(split(get_env_var("ALLOWED_SENDERS") ?? "", ",")) -> |_i, v| {
+        v = strip_whitespace(v)
+        if v != "" {
+          if !contains(v, "/") { if contains(v, ":") { v = v + "/128" } else { v = v + "/32" } }
+          allowed = push(allowed, v)
+        }
+      }
+      if length(allowed) == 0 {
+        allowed = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7", "fe80::/10"]
+      }
+      # Loopback immer (Selbsttest per ./lagezentrum.sh test; aus dem Netz nicht fälschbar)
+      allowed = append(allowed, ["127.0.0.0/8", "::1/128"])
+      if !(ip_cidr_contains(allowed, sender) ?? false) { abort }
+
+      raw = string(.message) ?? ""
+      src = ""
+      dst = ""
+      sp = 0
+      dp = 0
+      proto = ""
+      rule = ""
+
+      if contains(raw, "CEF:") {
+        # CEF (SIEM-Export): nur Sicherheits-/Firewall-Ereignisse, keine Erlaubt-Meldungen
+        c, err = parse_cef(raw)
+        if err != null { abort }
+        cat = downcase(string(c.UNIFIcategory) ?? "") + " " + downcase(string(c.UNIFIsubCategory) ?? "")
+        if !match(cat, r'security|firewall|threat|intrusion|honeypot') { abort }
+        action = downcase(join([
+          string(c.name) ?? "", string(c.act) ?? "", string(c.UNIFIaction) ?? "",
+          string(c.UNIFIruleAction) ?? "", string(c.UNIFIpolicyAction) ?? ""
+        ], " ") ?? "")
+        if match(action, r'\b(allow|allowed|accept|accepted|pass|passed)\b') { abort }
+        src = string(c.src) ?? (string(c.sourceAddress) ?? "")
+        dst = string(c.dst) ?? (string(c.destinationAddress) ?? "")
+        sp = to_int(c.spt) ?? 0
+        dp = to_int(c.dpt) ?? 0
+        proto = string(c.proto) ?? ""
+        rule = string(c.UNIFIpolicyName) ?? (string(c.UNIFIruleName) ?? (string(c.name) ?? ""))
+      } else if contains(raw, "SRC=") && contains(raw, "DST=") {
+        # iptables-Format der Firewall-Policies mit Syslog-Logging
+        # Felder einzeln per Regex: leere Werte wie "OUT= " verschieben so nichts
+        m_src = parse_regex(raw, r'\bSRC=(?P<v>[0-9A-Fa-f.:]+)') ?? {}
+        src = string(m_src.v) ?? ""
+        m_dst = parse_regex(raw, r'\bDST=(?P<v>[0-9A-Fa-f.:]+)') ?? {}
+        dst = string(m_dst.v) ?? ""
+        m_sp = parse_regex(raw, r'\bSPT=(?P<v>\d+)') ?? {}
+        sp = to_int(m_sp.v) ?? 0
+        m_dp = parse_regex(raw, r'\bDPT=(?P<v>\d+)') ?? {}
+        dp = to_int(m_dp.v) ?? 0
+        m_proto = parse_regex(raw, r'\bPROTO=(?P<v>\S+)') ?? {}
+        proto = string(m_proto.v) ?? ""
+        m_descr = parse_regex(raw, r'DESCR="(?P<v>[^"]*)"') ?? {}
+        descr = string(m_descr.v) ?? ""
+        # Regelname: erstes [..] mit Buchstaben (der Kernel-Zeitstempel [123.45] zählt nicht)
+        r = parse_regex(raw, r'\[(?P<rule>[^\]\s]*[A-Za-z][^\]]*)\]') ?? {}
+        rule = string(r.rule) ?? ""
+        # Logs von Erlauben-Regeln (…-A-…, allow, accept) nicht als „abgewehrt“ zeigen
+        if match(rule, r'(?i)-A-|-A$|accept|allow') || match(descr, r'(?i)\b(allow|accept)') { abort }
+        if descr != "" { rule = rule + " " + descr }
+      } else {
+        abort
+      }
+
+      if !(is_ipv4(src) || is_ipv6(src)) || !(is_ipv4(dst) || is_ipv6(dst)) { abort }
+
+      nets = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
+              "169.254.0.0/16", "127.0.0.0/8", "fc00::/7", "fe80::/10", "::1/128"]
+      extra = compact(map_values(split(get_env_var("LOCAL_EXTRA_NETS") ?? "", ",")) -> |v| { strip_whitespace(v) })
+      nets = append(nets, extra)
+      wans = compact(map_values(split(get_env_var("WAN_IP") ?? "", ",")) -> |v| { strip_whitespace(v) })
+      src_local = includes(wans, src) || (ip_cidr_contains(nets, src) ?? false)
+      dst_local = includes(wans, dst) || (ip_cidr_contains(nets, dst) ?? false)
+      # Geblockter Verkehr zwischen eigenen Netzen gehört nicht auf die Weltkarte
+      if src_local && dst_local { abort }
+
+      bdir = "in"
+      local = dst
+      remote = src
+      if src_local {
+        bdir = "out"; local = src; remote = dst
+      } else {
+        bdir = "in"; local = dst; remote = src
+      }
+
+      p = upcase(proto)
+      if p == "6" { p = "TCP" } else if p == "17" { p = "UDP" } else if p == "1" { p = "ICMP" }
+
+      . = {
+        "timestamp": now(),
+        "kind": "blocked",
+        "dir": "blocked",
+        "bdir": bdir,
+        "leg": "req",
+        "proto": p,
+        "local_ip": local,
+        "remote_ip": remote,
+        "sport": sp,
+        "dport": dp,
+        "rule": strip_whitespace(rule),
+        "bytes": 0,
+        # Schlüssel für die Duplikat-Erkennung (gleiche Meldung als CEF und iptables, 10-s-Fenster)
+        "_dk": remote + ">" + local + ":" + to_string(dp) + "/" + p + "@" + to_string(floor(to_unix_timestamp(now()) / 10))
+      }
+
+  blocked_dedupe:
+    type: dedupe
+    inputs: [blocked]
+    fields:
+      match: [_dk]
+    cache:
+      num_events: 2000
+
+  enrich:
+    type: remap
+    inputs: [flows, blocked_dedupe]
+    source: |
+      del(._dk)
+      remote = string(.remote_ip) ?? ""
+      local = string(.local_ip) ?? ""
+
+      if .dir != "internal" {
+        g, err = get_enrichment_table_record("geo", {"ip": remote})
+        if err == null {
+          .r_country = g.country.iso_code
+          name = g.country.names.de
+          if is_null(name) { name = g.country.names.en }
+          .r_country_name = name
+          city = g.city.names.de
+          if is_null(city) { city = g.city.names.en }
+          .r_city = city
+          .r_lat = g.location.latitude
+          .r_lon = g.location.longitude
+        }
+        a, err = get_enrichment_table_record("asn", {"ip": remote})
+        if err == null {
+          .r_asn = a.autonomous_system_number
+          .r_org = a.autonomous_system_organization
+        }
+      } else {
+        h2, err = get_enrichment_table_record("hosts", {"ip": remote})
+        if err == null { .remote_name = h2.name }
+      }
+
+      h, err = get_enrichment_table_record("hosts", {"ip": local})
+      if err == null {
+        .local_name = h.name
+      } else {
+        wans = compact(map_values(split(get_env_var("WAN_IP") ?? "", ",")) -> |v| { strip_whitespace(v) })
+        if includes(wans, local) { .local_name = (get_env_var("GATEWAY_NAME") ?? "Gateway") + " (WAN)" }
+      }
+
+      .message = upcase(string(.dir) ?? "") + " " + (string(.local_name) ?? local) + " " + local +
+                 " <> " + remote + " " + (string(.remote_name) ?? "") + " :" +
+                 (to_string(.dport) ?? "") + "/" + (string(.proto) ?? "") + " " +
+                 (string(.r_country) ?? "") + " " + (string(.r_country_name) ?? "") + " " +
+                 (string(.r_city) ?? "") + " " + (string(.r_org) ?? "")
+
+  # Live nur Anfragen; Antwort-Flows dienen nur dem Datenvolumen in der Historie
+  live_only:
+    type: filter
+    inputs: [enrich]
+    condition: '.leg == "req"'
+
+sinks:
+  # Historie
+  victorialogs:
+    type: elasticsearch
+    inputs: [enrich]
+    endpoints: ["http://127.0.0.1:9428/insert/elasticsearch/"]
+    mode: bulk
+    api_version: v8
+    healthcheck:
+      enabled: false
+    query:
+      _msg_field: message
+      _time_field: timestamp
+      _stream_fields: kind,dir
+    batch:
+      max_events: 2000
+      timeout_secs: 2
+    # Ist VictoriaLogs kurz weg, nicht den Live-Stream ausbremsen
+    buffer:
+      type: memory
+      max_events: 20000
+      when_full: drop_newest
+
+  # Live-Stream fürs Dashboard (nur lokal, Caddy reicht ihn unter /ws durch)
+  live:
+    type: websocket_server
+    inputs: [live_only]
+    address: 127.0.0.1:8090
+    encoding:
+      codec: json
+    buffer:
+      type: memory
+      max_events: 2000
+      when_full: drop_newest
+
+  # GoFlow2-Meldungen
+  goflow_console:
+    type: console
+    inputs: [goflow_log]
+    encoding:
+      codec: text

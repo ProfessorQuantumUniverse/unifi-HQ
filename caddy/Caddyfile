@@ -1,0 +1,74 @@
+# Lagezentrum – Webserver
+# Liefert das Dashboard aus und reicht /ws (Live-Stream) und /select (Historie)
+# an die nur lokal lauschenden Dienste weiter. Erreichbar ausschließlich aus dem LAN.
+{
+	admin off
+	auto_https off
+	persist_config off
+	servers {
+		protocols h1 h2c
+	}
+}
+
+:{$HTTP_PORT:8080} {
+	# "route" erzwingt die Reihenfolge: Zugriffsprüfung immer zuerst
+	# (sonst sortiert Caddy "abort" hinter "handle" und die Prüfung greift nie).
+	route {
+		# --- Nur lokales Netz ---------------------------------------------------
+		# ALLOWED_CLIENTS (in der .env) überschreibt die Standard-Bereiche.
+		@foreign not remote_ip {$ALLOWED_CLIENTS:private_ranges}
+		abort @foreign
+
+		# Anfragen, die über einen Cloudflare-Tunnel o. ä. hereingereicht werden, ablehnen,
+		# auch wenn cloudflared selbst im LAN steht.
+		@tunneled header_regexp Cf-Connecting-Ip .+
+		abort @tunneled
+
+		# --- Optionaler Passwortschutz (./lagezentrum.sh password) -------------
+		import /etc/caddy/auth/*.caddy
+
+		# --- Sicherheits-Header ------------------------------------------------
+		header {
+			defer
+			-Server
+			X-Content-Type-Options nosniff
+			X-Frame-Options DENY
+			Referrer-Policy no-referrer
+			Cross-Origin-Opener-Policy same-origin
+			Cross-Origin-Resource-Policy same-origin
+			Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+			Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+		}
+
+		encode zstd gzip
+
+		# Live-Stream von Vector (nur 127.0.0.1:8090)
+		handle /ws {
+			rewrite * /
+			reverse_proxy 127.0.0.1:8090
+		}
+
+		# Laufzeit-Einstellungen fürs Dashboard aus der .env
+		handle /config.json {
+			header Content-Type application/json
+			header Cache-Control no-store
+			respond `{"home":{"lat":{$HOME_LAT:50.11},"lng":{$HOME_LON:8.68},"label":"{$HOME_LABEL:Zuhause}"},"gateway":"{$GATEWAY_NAME:Gateway}"}` 200
+		}
+
+		# Abfragen + Weboberfläche von VictoriaLogs (/select/vmui/), nur lesend
+		handle /select/* {
+			@write not method GET HEAD POST
+			respond @write 405
+			reverse_proxy 127.0.0.1:9428
+		}
+
+		# Dashboard
+		handle {
+			root * /srv
+			@static path /vendor/*
+			header @static Cache-Control "public, max-age=604800"
+			header ?Cache-Control no-cache
+			file_server
+		}
+	}
+}
