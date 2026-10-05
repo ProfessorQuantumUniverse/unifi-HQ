@@ -191,9 +191,10 @@ der Historie landen (inkl. GeoIP). Danach:
 
 | | |
 |---|---|
+| **⚙ Einstellungen** | *Gleichmäßig abspielen* (Standard an): Das Gateway schickt Flows gebündelt alle paar Sekunden. Das Dashboard puffert sie und spielt sie im echten Takt ab – mit ein paar Sekunden Versatz, den es selbst misst. Außerdem Bögen kräftig/dezent und Bögen pro Sekunde. |
 | **Filter-Chips** | Raus / Rein (an), Abgewehrt / Intern (aus), DNS (aus). Die Auswahl merkt sich der Browser. |
-| **Ticker** | Klick zoomt zum Ort; Doppelklick öffnet den Verlauf dieser IP. |
-| **Linke Spalte** | 24-h-Zähler mit Datenvolumen, Verbindungen pro Stunde, Top-Ziele, Länder, Geräte. Jeder Eintrag öffnet den passenden Verlauf. |
+| **Ticker** | Pro Verbindung Upload ↑, Download ↓ und Dauer. Klick zoomt zum Ort; Doppelklick öffnet den Verlauf dieser IP. Oben: Verbindungen und Datenmenge pro Minute. |
+| **Linke Spalte** | 24-h-Zähler mit Datenvolumen, Anzahl Ziele/Firmen/Länder/Geräte, Stundengrafik (Klick auf den Titel schaltet zwischen Verbindungen und Datenmenge um), Top-Ziele, Länder, Dienste, größte und längste Verbindungen, Geräte. Jeder Eintrag öffnet den passenden Verlauf. |
 | **Verlauf** (Taste `/`) | Volltextsuche über IP, Gerät, Land, Stadt, Provider – oder direkt LogsQL. |
 | **Punkte auf dem Globus** | Hotspots der letzten 15 Minuten; Klick öffnet den Verlauf des Landes. |
 
@@ -208,7 +209,7 @@ dport:443 | stats by (local_name) sum(bytes) bytes     eigene Auswertung mit Pip
 ```
 
 Felder: `dir` (out/in/blocked/internal), `leg`, `proto`, `local_ip`, `local_name`, `remote_ip`,
-`remote_name`, `sport`, `dport`, `bytes`, `packets`, `rule`, `r_country`, `r_country_name`,
+`remote_name`, `sport`, `dport`, `bytes`, `packets`, `duration_ms`, `rule`, `r_country`, `r_country_name`,
 `r_city`, `r_org`, `r_asn`. Für Profi-Auswertungen gibt es die VictoriaLogs-Oberfläche unter
 `http://<LXC-IP>:8080/select/vmui/`.
 
@@ -218,6 +219,17 @@ Relief und Sternenhimmel, weniger Bögen).
 ---
 
 ## Betrieb
+
+**Update auf eine neue Version** – bei Installation über `create-lxc.sh` (Variante A) auf dem Proxmox-Host:
+
+```bash
+cd /root/unifi-HQ && git pull
+./proxmox/update-lxc.sh            # findet den CT mit Hostname "lagezentrum", sonst: ./proxmox/update-lxc.sh <CTID>
+```
+
+Das kopiert den neuen Stand in den Container, baut neu und macht den Selbsttest. `.env`,
+`hosts.csv`, GeoIP-Daten, Passwort und Historie bleiben unangetastet. Bei Variante B (Git im
+Container): `cd /opt/lagezentrum && git pull && docker compose up -d --build && docker compose restart collector caddy`.
 
 ```bash
 ./lagezentrum.sh status      # Container, RAM, Plattenplatz, Ereignisse der letzten Stunde
@@ -300,6 +312,7 @@ docker-compose.yml        Container, Härtung, RAM-Limits, Log-Rotation
 .env.example              Vorlage für .env (setup kopiert sie)
 install.sh                Installation im LXC: Pakete, Docker, Projekt, Setup, Selbsttest
 proxmox/create-lxc.sh     auf dem Proxmox-Host: LXC anlegen und install.sh darin starten
+proxmox/update-lxc.sh     auf dem Proxmox-Host: neuen Stand in den LXC kopieren und neu starten
 lagezentrum.sh            setup · test · status · geoip · password · update · logs
 collector/Dockerfile      Vector + GoFlow2 in einem Image
 collector/vector.yaml     Pipeline: Klassifizierung, Syslog-Parser, GeoIP, Senken

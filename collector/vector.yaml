@@ -165,6 +165,11 @@ transforms:
         if abs(to_unix_timestamp(ft) - to_unix_timestamp(now())) < 3600 { t = ft }
       }
 
+      # Dauer der Verbindung (bzw. des gemeldeten Abschnitts bei langen Verbindungen)
+      dur = 0
+      tsn = int(f.time_flow_start_ns) ?? 0
+      if tsn > 0 && te >= tsn { dur = to_int((te - tsn) / 1000000) }
+
       rate = int(f.sampling_rate) ?? 1
       if rate < 1 { rate = 1 }
       proto = string(f.proto) ?? (to_string(f.proto) ?? "")
@@ -180,7 +185,8 @@ transforms:
         "sport": cport,
         "dport": srvport,
         "bytes": (int(f.bytes) ?? 0) * rate,
-        "packets": (int(f.packets) ?? 0) * rate
+        "packets": (int(f.packets) ?? 0) * rate,
+        "duration_ms": dur
       }
 
   blocked:
@@ -349,12 +355,6 @@ transforms:
                  (string(.r_country) ?? "") + " " + (string(.r_country_name) ?? "") + " " +
                  (string(.r_city) ?? "") + " " + (string(.r_org) ?? "")
 
-  # Live nur Anfragen; Antwort-Flows dienen nur dem Datenvolumen in der Historie
-  live_only:
-    type: filter
-    inputs: [enrich]
-    condition: '.leg == "req"'
-
 sinks:
   # Historie
   victorialogs:
@@ -381,7 +381,7 @@ sinks:
   # Live-Stream fürs Dashboard (nur lokal, Caddy reicht ihn unter /ws durch)
   live:
     type: websocket_server
-    inputs: [live_only]
+    inputs: [enrich]          # Anfragen und Antworten; das Dashboard ordnet die Antwort-Bytes zu
     address: 127.0.0.1:8090
     encoding:
       codec: json
