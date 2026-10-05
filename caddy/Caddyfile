@@ -48,6 +48,16 @@
 			reverse_proxy 127.0.0.1:8090
 		}
 
+		# API: Gerätenamen lesen/speichern (nur 127.0.0.1:8092)
+		handle /api/* {
+			@bad not method GET PUT DELETE
+			respond @bad 405
+			request_body {
+				max_size 8KB
+			}
+			reverse_proxy 127.0.0.1:8092
+		}
+
 		# Laufzeit-Einstellungen fürs Dashboard aus der .env
 		handle /config.json {
 			header Content-Type application/json

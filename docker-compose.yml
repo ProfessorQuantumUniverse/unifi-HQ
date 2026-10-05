@@ -66,7 +66,7 @@ services:
       VECTOR_THREADS: ${VECTOR_THREADS:-1}   # 1 Thread spart ~30 % CPU, reicht für >2000 Flows/s
     volumes:
       - ./collector/vector.yaml:/etc/vector/vector.yaml:ro
-      - ./config/hosts.csv:/etc/vector/hosts.csv:ro
+      - ./config:/etc/vector/config:ro      # Ordner statt Datei: Änderungen der API kommen an
       - ./geoip:/geoip:ro
     tmpfs:
       - /var/lib/vector:uid=65534,gid=65534,size=16m
@@ -76,6 +76,22 @@ services:
       victorialogs:
         condition: service_started
     mem_limit: 384m
+
+  # Kleine API fürs Dashboard: Gerätenamen speichern (config/hosts.csv) und Vector neu laden lassen
+  api:
+    <<: *hardening
+    build: ./api
+    image: lagezentrum-api:local
+    user: "0:0"
+    cap_add: [KILL]                  # nur für SIGHUP an Vector, der als nobody läuft
+    pid: "service:collector"         # sieht den Vector-Prozess
+    environment:
+      HOSTS_FILE: /config/hosts.csv
+      LISTEN: 127.0.0.1:8092
+    volumes:
+      - ./config:/config
+    depends_on: [collector]
+    mem_limit: 32m
 
   # Webserver: Dashboard + /ws (Live) + /select (Abfragen), nur fürs lokale Netz
   caddy:
@@ -96,7 +112,7 @@ services:
     tmpfs:
       - /data:size=1m
       - /config:size=1m
-    depends_on: [collector, victorialogs]
+    depends_on: [collector, victorialogs, api]
     mem_limit: 64m
 
 volumes:

@@ -33,7 +33,9 @@ UCG Max ──Syslog UDP 5514──▶ Vector ◀─┘
                                │  Richtung erkennen · Antworten zuordnen · GeoIP/ASN · Gerätenamen
                                ├──▶ VictoriaLogs   127.0.0.1:9428   Historie (90 Tage / 20 GiB)
                                └──▶ WebSocket      127.0.0.1:8090   Live-Stream
-Browser ──HTTP 8080──▶ Caddy ──▶ Dashboard · /ws (live) · /select (Abfragen)   nur LAN
+Browser ──HTTP 8080──▶ Caddy ──▶ Dashboard · /ws (live) · /select (Abfragen) · /api (Namen)   nur LAN
+                                                              │
+                                     API 127.0.0.1:8092 ──▶ config/hosts.csv ──SIGHUP──▶ Vector lädt Namen neu
 ```
 
 | Container | Aufgabe | RAM-Limit |
@@ -41,6 +43,7 @@ Browser ──HTTP 8080──▶ Caddy ──▶ Dashboard · /ws (live) · /sel
 | `collector` | Vector 0.58 mit eingebautem GoFlow2 2.2.7 | 384 MB |
 | `victorialogs` | Historie, stark komprimiert | 512 MB |
 | `caddy` | Webserver, Zugriffsschutz | 64 MB |
+| `api` | Gerätenamen aus dem Dashboard speichern (Go, ~5 MB) | 32 MB |
 | `geoip` | Einmal-Job: lädt DB-IP Lite, wenn nötig | 128 MB |
 
 Alle Container laufen mit schreibgeschütztem Dateisystem, ohne Linux-Capabilities
@@ -193,10 +196,14 @@ der Historie landen (inkl. GeoIP). Danach:
 |---|---|
 | **⚙ Einstellungen** | *Gleichmäßig abspielen* (Standard an): Das Gateway schickt Flows gebündelt alle paar Sekunden. Das Dashboard puffert sie und spielt sie im echten Takt ab – mit ein paar Sekunden Versatz, den es selbst misst. Außerdem Bögen kräftig/dezent und Bögen pro Sekunde. |
 | **Filter-Chips** | Raus / Rein (an), Abgewehrt / Intern (aus), DNS (aus). Die Auswahl merkt sich der Browser. |
-| **Ticker** | Pro Verbindung Upload ↑, Download ↓ und Dauer. Klick zoomt zum Ort; Doppelklick öffnet den Verlauf dieser IP. Oben: Verbindungen und Datenmenge pro Minute. |
-| **Linke Spalte** | 24-h-Zähler mit Datenvolumen, Anzahl Ziele/Firmen/Länder/Geräte, Stundengrafik (Klick auf den Titel schaltet zwischen Verbindungen und Datenmenge um), Top-Ziele, Länder, Dienste, größte und längste Verbindungen, Geräte. Jeder Eintrag öffnet den passenden Verlauf. |
+| **Ticker** | Pro Verbindung Upload ↑, Download ↓ und Dauer. Beim Überfahren: ✎ Namen vergeben, Dossier zu Gerät, Land, Firma oder IP. Klick zoomt zum Ort; Doppelklick öffnet den Verlauf dieser IP. Oben: Verbindungen und Datenmenge pro Minute. |
+| **Linke Spalte** | 24-h-Zähler mit Datenvolumen, Anzahl Ziele/Firmen/Länder/Geräte, Stundengrafik (Klick auf den Titel schaltet zwischen Verbindungen und Datenmenge um), Top-Ziele, Länder, Dienste, größte und längste Verbindungen, Geräte. Länder, Firmen und Geräte öffnen ihr Dossier, der Rest den Verlauf. |
+| **Globus** | Länder sind nach Verkehr der letzten 24 h eingefärbt (abschaltbar). Klick auf ein Land oder einen Hotspot-Punkt öffnet das Länder-Dossier. |
+| **Dossier** | Für ein Land, ein Gerät, eine Firma oder eine einzelne IP: Kennzahlen (Verbindungen, Datenmenge, IPs, Geräte, erster/letzter Kontakt, Abgewehrt), Zeitachse, Top-Listen und alle Verbindungspaare **Quelle → Ziel** mit Dienst, Anzahl und Datenmenge. Zeitraum 1 h bis 30 Tage. Klick auf ein Paar öffnet die Einzelverbindungen. |
+| **Länder** | Alle Länder als sortierbare Tabelle (Verbindungen, Daten, Geräte, IPs, Abgewehrt) – Klick öffnet das Dossier. |
+| **Geräte** | Alle Adressen mit Verkehr, Namen vergeben oder löschen (✎), auch für externe IPs (*+ Name für IP*, z. B. dein VPS). Namen gelten sofort im Dashboard, für alle neuen Einträge der Historie, und die Suche nach einem Namen findet auch ältere Einträge dieser IP. |
+| **Erstkontakt** | Meldung oben, wenn ein Gerät ein Land oder eine Firma zum ersten Mal seit 30 Tagen kontaktiert (abschaltbar; startet, sobald es einen Tag Historie gibt). |
 | **Verlauf** (Taste `/`) | Volltextsuche über IP, Gerät, Land, Stadt, Provider – oder direkt LogsQL. |
-| **Punkte auf dem Globus** | Hotspots der letzten 15 Minuten; Klick öffnet den Verlauf des Landes. |
 
 Beispiele für die Suche:
 
@@ -210,11 +217,31 @@ dport:443 | stats by (local_name) sum(bytes) bytes     eigene Auswertung mit Pip
 
 Felder: `dir` (out/in/blocked/internal), `leg`, `proto`, `local_ip`, `local_name`, `remote_ip`,
 `remote_name`, `sport`, `dport`, `bytes`, `packets`, `duration_ms`, `rule`, `r_country`, `r_country_name`,
-`r_city`, `r_org`, `r_asn`. Für Profi-Auswertungen gibt es die VictoriaLogs-Oberfläche unter
+`r_city`, `r_org`, `r_asn`, `in_if`, `out_if`. Für Profi-Auswertungen gibt es die VictoriaLogs-Oberfläche unter
 `http://<LXC-IP>:8080/select/vmui/`.
 
 URL-Optionen: `?demo` (Beispieldaten), `?lite` (für schwache Geräte wie einen Pi-Kiosk: ohne
 Relief und Sternenhimmel, weniger Bögen).
+
+---
+
+## Was UniFi exportiert (und was nicht)
+
+Ubiquiti dokumentiert nicht genau, welche Verbindungen per NetFlow/IPFIX rausgehen. Stand der Beobachtung:
+
+- **„Rein“ bleibt bei dir leer, und das ist richtig.** Rein gibt es nur, wenn von außen etwas bei dir
+  erreichbar ist (Portfreigabe). Der Cloudflare-Tunnel baut seine Verbindung von innen nach außen auf –
+  er erscheint als „raus“ zu Cloudflare (Port 7844).
+- **Verkehr zum Gateway selbst** (DNS an `10.37.x.1`, der WireGuard-Server des UCG) taucht in den Exporten
+  bisher nicht auf. Damit fehlen auch eingehende VPN-Verbindungen.
+- **VPN-Clients** stecken in einem eigenen Netz, das in der NetFlow-Auswahl nicht wählbar ist – ihr
+  Verkehr wird nicht exportiert.
+- **Zwischen VLANs:** noch offen. Test zu Hause: von einem Gerät ein Gerät in einem anderen VLAN anpingen,
+  danach Filter „Intern“ einschalten. Zur Diagnose speichert die Pipeline die Interface-Nummern:
+  `_time:24h kind:flow | stats by (in_if, out_if, dir) count()` im Verlauf zeigt, über welche Wege
+  das Gateway überhaupt exportiert.
+- Einige Firmware-Versionen hatten Fehler beim Export (Berichte zu Network 9.3.45 und 9.4.17 in der
+  Ubiquiti-Community). Wenn plötzlich weniger kommt: Firmware-Version prüfen.
 
 ---
 
@@ -262,6 +289,10 @@ Container): `cd /opt/lagezentrum && git pull && docker compose up -d --build && 
   Über Caddy ist von VictoriaLogs nur der lesende Teil `/select` erreichbar.
 - **Kein Docker-Socket**, keine externen CDNs: globe.gl, Texturen und Schriften liegen in
   `web/vendor/`. Der Browser lädt nichts von Dritten (strikte Content-Security-Policy).
+- **Namens-API:** Über `/api/names` kann jeder, der das Dashboard öffnen darf, Namen setzen – also
+  nur Clients aus dem LAN (und mit Passwort, falls gesetzt). Die API prüft IP und Namen, nimmt nur
+  JSON von derselben Seite an (Schutz gegen fremde Webseiten im selben Browser) und schreibt nur
+  `config/hosts.csv`. Sie läuft ohne Rechte außer dem Senden des Neuladen-Signals an Vector.
 - **Passwort (optional):** `./lagezentrum.sh password` setzt Basic Auth für Dashboard, Live-Stream
   und Historie; `./lagezentrum.sh password off` entfernt sie wieder.
 
@@ -320,8 +351,11 @@ config/hosts.example.csv  Vorlage für Gerätenamen
 caddy/Caddyfile           Webserver, LAN-Sperre, Sicherheits-Header
 caddy/auth/               hier landet die optionale Basic-Auth
 scripts/geoip-update.sh   GeoIP-Download (läuft im geoip-Container)
+api/                      Namens-API (Go, nur Standardbibliothek)
 web/                      Dashboard (index.html, app.js, app.css) + vendor/ (globe.gl, Texturen, Schriften)
 geoip/                    heruntergeladene Datenbanken (nicht im Git)
 ```
 
 IP-Geolokation: [DB-IP.com](https://db-ip.com) Lite, CC BY 4.0. globe.gl: MIT. IBM Plex: SIL OFL 1.1.
+Flaggen: Twemoji Country Flags (Code MIT, Grafiken [Twemoji](https://github.com/twitter/twemoji) CC BY 4.0) –
+damit erscheinen Flaggen auch unter Windows. Ländergrenzen: [Natural Earth](https://www.naturalearthdata.com), gemeinfrei.
