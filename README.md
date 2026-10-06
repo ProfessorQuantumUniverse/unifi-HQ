@@ -57,12 +57,12 @@ alle Downloads). Über die WAN-Grenze gilt die lokale Seite als Client, außer i
 
 ---
 
-## 1. Proxmox: Storage für die Spare-SSD
+## 1. Proxmox: Storage für die Logs
 
 Einmalig, damit Logs nie auf der System-SSD landen:
 
-1. Node → Disks: die Platte muss als ungenutzt gelistet sein (sonst *Wipe Disk* – löscht alles darauf).
-2. Node → Disks → LVM-Thin → *Create: Thinpool*, Disk wählen, Name `ssd-logs`, *Add Storage* angehakt.
+0a. Node → Disks: die Platte muss als ungenutzt gelistet sein (sonst *Wipe Disk* – löscht alles darauf).
+1. Node → Disks → LVM-Thin → *Create: Thinpool*, Disk wählen, Name `ssd-logs`, *Add Storage* angehakt.
 
 ---
 
@@ -71,18 +71,26 @@ Einmalig, damit Logs nie auf der System-SSD landen:
 ### Variante A: alles automatisch (empfohlen)
 
 Auf dem **Proxmox-Host** als root:
+**WICHTIG:** Unbedingt VLAN=xx angeben, damit der LXC in einem VLAN mit folgenden Eigenschaften landet:
+* Das Gateway VLAN kann VLAN-xx erreichen
+* VLAN-xx hat Internetzugriff
+* Das Client/Trusted VLAN (Da wo deine Geräte sind) kann auf VLAN-xx zugreifen!
 
+VLAN=xx vor dem Ausführen gegen die echte ID ersetzen; zB VLAN=10
+
+Vom Host:
 ```bash
 apt -y install git
 git clone https://github.com/ProfessorQuantumUniverse/unifi-HQ.git /root/unifi-HQ
-/root/unifi-HQ/proxmox/create-lxc.sh
+VLAN=xx /root/unifi-HQ/proxmox/create-lxc.sh
 ```
 
 Das Skript lädt das aktuelle Debian-Template, legt einen unprivilegierten LXC auf `ssd-logs` an
-(2 Kerne, 1536 MB RAM als Obergrenze, 32 GB, `nesting` + `keyctl`, Start beim Booten), kopiert
+(2 Kerne, 1536 MB RAM als Obergrenze, 32 GB Festplatte, `nesting` + `keyctl`, Start beim Booten), kopiert
 das Projekt hinein und ruft dort `install.sh` auf. Am Ende stehen IP und alle Adressen da.
 Platten fasst es nicht an.
 
+Später via Setupskript (empfohlen), oder:
 Anpassen per Umgebungsvariablen, z. B. feste IP im VLAN 10 und Gateway-IP vorgeben:
 
 ```bash
@@ -132,20 +140,26 @@ GeoIP-Update per Cron ein. Erneut aufrufen ist gefahrlos: `./lagezentrum.sh setu
 
 ### A. NetFlow (alle erlaubten Verbindungen)
 
-Einstellungen → *Traffic Logging* (je nach Version unter *System* oder *CyberSecure*):
-
-- **NetFlow (IPFIX)** an, Collector `<LXC-IP>`, Port `2055`, Version 10 (IPFIX)
+Einstellungen → CyberSecure → *Traffic Logging*:
+- **NetFlow (IPFIX)** an, Collector `<LXC-IP>`, Port `2055`, Version 10 (IPFIX), 
 - **Alle Netzwerke** auswählen, sonst fehlen VLANs
 - Flow-Protokollierung: *Gesamter Datenverkehr*
+- Engine-ID: Automatisch
+- Timeout-Rate: 1 min
+- Bildwiederholrate: 20
+- **Sampling Modus: AUS**
+- Sampling-Rate: MUSS ausgegraut sein
 
-### B. Syslog (für „Abgewehrt“)
+Etwaige Performance Warnungen ignorieren/akzeptieren; die Performance bricht damit erst bei 1000+ Geräten spürbar ein.
+
+### B. (Optional) Syslog (für „Abgewehrt“)
 
 Gleiche Seite, *Activity Logging / SIEM-Server*:
 
 - Adresse `<LXC-IP>`, Port `5514`
 - Bei den Inhalten mindestens die Sicherheits-Erkennungen anhaken
 
-### C. Optionale Regel für die Anklopfer
+### C. (Optionales Optional) Regel für die Anklopfer
 
 Ohne diese Regel prallen Scanner stumm an der eingebauten Default-Regel ab und der rote Filter
 bleibt leer. Die Regel ändert nichts am Verhalten der Firewall – sie blockt, was ohnehin
@@ -177,7 +191,9 @@ bei den roten Bögen. Alles andere funktioniert trotzdem.
 
 ## 4. Testen
 
+Vom Host:
 ```bash
+pct enter <LXC ID>
 ./lagezentrum.sh test
 ```
 
