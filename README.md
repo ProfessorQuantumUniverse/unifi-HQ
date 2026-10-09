@@ -5,7 +5,8 @@ Bogen über einen 3D-Globus. Dazu Live-Ticker, 24-h-Statistik und eine durchsuch
 
 - **Standardansicht:** erlaubte Verbindungen raus (cyan) und rein (grün)
 - **Zuschaltbar:** abgewehrte Anklopfer aus dem Internet (rot) und Verkehr zwischen VLANs (lila)
-- **Nur im LAN erreichbar**, ein einzelner LXC, rund 200–250 MB RAM im Betrieb
+- **Nur im LAN erreichbar und mit Login** (ein Passwort, der Browser bleibt angemeldet), ein einzelner LXC,
+  rund 200–250 MB RAM im Betrieb
 
 ---
 
@@ -34,8 +35,10 @@ UCG Max ──Syslog UDP 5514──▶ Vector ◀─┘
                                ├──▶ VictoriaLogs   127.0.0.1:9428   Historie (90 Tage / 20 GiB)
                                └──▶ WebSocket      127.0.0.1:8090   Live-Stream
 Browser ──HTTP 8080──▶ Caddy ──▶ Dashboard · /ws (live) · /select (Abfragen) · /api (Namen)   nur LAN
-                                                              │
-                                     API 127.0.0.1:8092 ──▶ config/hosts.csv ──SIGHUP──▶ Vector lädt Namen neu
+                         │  Sitzung gültig? (forward_auth)                       │
+                         ▼                                                       │
+                API 127.0.0.1:8092 ◀─────────────────────────────────────────────┘
+                Login · config/hosts.csv ──SIGHUP──▶ Vector lädt Namen neu
 ```
 
 | Container | Aufgabe | RAM-Limit |
@@ -43,7 +46,7 @@ Browser ──HTTP 8080──▶ Caddy ──▶ Dashboard · /ws (live) · /sel
 | `collector` | Vector 0.58 mit eingebautem GoFlow2 2.2.7 | 384 MB |
 | `victorialogs` | Historie, stark komprimiert | 512 MB |
 | `caddy` | Webserver, Zugriffsschutz | 64 MB |
-| `api` | Gerätenamen aus dem Dashboard speichern (Go, ~5 MB) | 32 MB |
+| `api` | Login prüfen, Gerätenamen aus dem Dashboard speichern (Go, ~5 MB) | 32 MB |
 | `geoip` | Einmal-Job: lädt DB-IP Lite, wenn nötig | 128 MB |
 
 Alle Container laufen mit schreibgeschütztem Dateisystem, ohne Linux-Capabilities
@@ -128,6 +131,7 @@ Variante A, die das Projekt vom Host in den Container kopiert.
 | `GATEWAY_NAME`, `HOME_LABEL`, `HOME_LAT`, `HOME_LON` | Name und Standort auf dem Globus |
 | `LOCAL_EXTRA_NETS` | dein IPv6-Präfix, z. B. `2003:ab:cd00::/56` – sonst erscheinen eigene Geräte mit IPv6 als „Fremde“ |
 | `LOCAL_SERVER_PORTS` | von außen erreichbare Ports (Portfreigaben, VPN-Server), Standard `51820` |
+| Login-Passwort | fragt `setup` am Ende ab (mindestens 10 Zeichen); landet nur als Hash in der `.env` |
 
 Alles landet in `.env` und lässt sich dort jederzeit ändern (danach `docker compose up -d`).
 Gerätenamen trägst du in `config/hosts.csv` ein, eine Zeile pro Gerät: `10.37.10.3,homelable`
@@ -200,7 +204,7 @@ pct enter <LXC ID>
 Schickt einen Test-Flow und eine Test-Syslog-Zeile durch die ganze Kette und prüft, ob sie in
 der Historie landen (inkl. GeoIP). Danach:
 
-1. `http://<LXC-IP>:8080/?demo` – Globus mit Beispieldaten, ganz ohne UniFi
+1. `http://<LXC-IP>:8080/?demo` – erst die Login-Seite, nach der Anmeldung der Globus mit Beispieldaten, ganz ohne UniFi
 2. `http://<LXC-IP>:8080` – oben links muss **Live** mit grünem Punkt stehen
 3. Echte Flows brauchen nach dem Einschalten im UniFi etwa eine Minute (IPFIX-Templates).
 
@@ -210,7 +214,7 @@ der Historie landen (inkl. GeoIP). Danach:
 
 | | |
 |---|---|
-| **⚙ Einstellungen** | *Gleichmäßig abspielen* (Standard an): Das Gateway schickt Flows gebündelt alle paar Sekunden. Das Dashboard puffert sie und spielt sie im echten Takt ab – mit ein paar Sekunden Versatz, den es selbst misst. Außerdem Bögen kräftig/dezent und Bögen pro Sekunde. |
+| **⚙ Einstellungen** | *Gleichmäßig abspielen* (Standard an): Das Gateway schickt Flows gebündelt alle paar Sekunden. Das Dashboard puffert sie und spielt sie im echten Takt ab – mit ein paar Sekunden Versatz, den es selbst misst. Außerdem Bögen kräftig/dezent und Bögen pro Sekunde. Ganz unten: *Abmelden* (nur dieser Browser). |
 | **Filter-Chips** | Raus / Rein (an), Abgewehrt / Intern (aus), DNS (aus). Die Auswahl merkt sich der Browser. |
 | **Ticker** | Pro Verbindung Upload ↑, Download ↓ und Dauer. Beim Überfahren: ✎ Namen vergeben, Dossier zu Gerät, Land, Firma oder IP. Klick zoomt zum Ort; Doppelklick öffnet den Verlauf dieser IP. Oben: Verbindungen und Datenmenge pro Minute. |
 | **Linke Spalte** | 24-h-Zähler mit Datenvolumen, Anzahl Ziele/Firmen/Länder/Geräte, Stundengrafik (Klick auf den Titel schaltet zwischen Verbindungen und Datenmenge um), Top-Ziele, Länder, Dienste, größte und längste Verbindungen, Geräte. Länder, Firmen und Geräte öffnen ihr Dossier, der Rest den Verlauf. |
@@ -274,6 +278,34 @@ Das kopiert den neuen Stand in den Container, baut neu und macht den Selbsttest.
 `hosts.csv`, GeoIP-Daten, Passwort und Historie bleiben unangetastet. Bei Variante B (Git im
 Container): `cd /opt/lagezentrum && git pull && docker compose up -d --build && docker compose restart collector caddy`.
 
+**Erstes Update auf die Version mit Login:** Bis ein Passwort gesetzt ist, bleibt das Dashboard
+wie bisher offen (das Update-Skript weist darauf hin). Einmal im Container setzen:
+
+```bash
+pct enter <LXC ID>
+cd /opt/lagezentrum && ./lagezentrum.sh password
+```
+
+Ein altes Basic Auth (Browser-Passwortfenster aus früheren Versionen) entfernt `password` dabei automatisch.
+
+### Login
+
+Das Dashboard fragt einmal nach dem Passwort und merkt sich die Anmeldung in einem Cookie. Das
+gilt 400 Tage (mehr erlauben Browser nicht) und verlängert sich bei jeder Nutzung von selbst –
+ein Kiosk oder ein Browser, der das Dashboard regelmäßig öffnet, bleibt also praktisch dauerhaft angemeldet.
+
+```bash
+./lagezentrum.sh password          # Passwort setzen oder ändern (meldet alle Browser ab)
+./lagezentrum.sh password logout   # alle Browser abmelden, Passwort bleibt
+./lagezentrum.sh password off      # Login ausschalten – jeder im LAN sieht das Dashboard
+```
+
+Geschützt ist alles: Dashboard, Live-Stream (`/ws`), Historie (`/select`, auch die VictoriaLogs-Oberfläche),
+Namens-API und `config.json`. Ohne Anmeldung landen Seitenaufrufe auf `/login.html`, alles andere
+bekommt `401`. Frei erreichbar sind nur die Login-Seite selbst und `/vendor/` (globe.gl, Texturen,
+Schriften – keine Daten). Interne Dienste wie VictoriaLogs und der Live-Stream hören weiterhin nur
+auf `127.0.0.1`; der Selbsttest und der Collector sprechen sie direkt an, ohne Login.
+
 ```bash
 ./lagezentrum.sh status      # Container, RAM, Plattenplatz, Ereignisse der letzten Stunde
 ./lagezentrum.sh update      # neue Images ziehen und neu starten
@@ -306,11 +338,18 @@ Container): `cd /opt/lagezentrum && git pull && docker compose up -d --build && 
 - **Kein Docker-Socket**, keine externen CDNs: globe.gl, Texturen und Schriften liegen in
   `web/vendor/`. Der Browser lädt nichts von Dritten (strikte Content-Security-Policy).
 - **Namens-API:** Über `/api/names` kann jeder, der das Dashboard öffnen darf, Namen setzen – also
-  nur Clients aus dem LAN (und mit Passwort, falls gesetzt). Die API prüft IP und Namen, nimmt nur
+  nur angemeldete Clients aus dem LAN. Die API prüft IP und Namen, nimmt nur
   JSON von derselben Seite an (Schutz gegen fremde Webseiten im selben Browser) und schreibt nur
   `config/hosts.csv`. Sie läuft ohne Rechte außer dem Senden des Neuladen-Signals an Vector.
-- **Passwort (optional):** `./lagezentrum.sh password` setzt Basic Auth für Dashboard, Live-Stream
-  und Historie; `./lagezentrum.sh password off` entfernt sie wieder.
+- **Login:** `./lagezentrum.sh password` (siehe [Login](#login)). Caddy fragt vor jeder Anfrage die
+  API, ob die Sitzung gültig ist (`forward_auth`). Das Passwort liegt nur als PBKDF2-Hash
+  (600 000 Runden, SHA-256) in der `.env`; das Sitzungs-Cookie ist mit `AUTH_SECRET` signiert (HMAC-SHA256),
+  `HttpOnly` und `SameSite=Lax`. Ein neues Passwort oder `password logout` macht alle alten Cookies
+  ungültig. Gegen Durchprobieren: Jeder Fehlversuch kostet eine Sekunde, nach 5 Fehlversuchen ist
+  die Adresse 1 Minute gesperrt, danach jeweils doppelt so lange (höchstens 15 Minuten).
+  Das Cookie ist nicht `Secure`, weil das Dashboard im LAN über einfaches HTTP läuft – wer den
+  LAN-Verkehr mitlesen kann, kann auch das Cookie mitlesen. Für ein Heimnetz ist das vertretbar;
+  Gäste und IoT-Geräte gehören ohnehin in ein eigenes VLAN.
 
 ---
 
@@ -346,6 +385,10 @@ nicht auf dem Server; im Hintergrund-Tab pausiert es.
 | Statistik zeigt *Historie nicht erreichbar* | VictoriaLogs down | `docker compose logs victorialogs` |
 | Dashboard aus dem LAN nicht erreichbar | Client nicht in `ALLOWED_CLIENTS` | z. B. Tailscale (100.64/10) oder öffentliche IPv6 ergänzen |
 | Globus ruckelt auf dem Kiosk-Pi | GPU zu schwach | `?lite` an die URL hängen |
+| Passwort vergessen | – | `./lagezentrum.sh password` setzt ein neues |
+| Login meldet *Zu viele Fehlversuche* | Sperre nach 5 Fehlversuchen | abwarten (höchstens 15 min) oder `docker compose restart api` |
+| Überall *502* | API läuft nicht, ohne sie lässt Caddy niemanden durch | `docker compose ps`, `docker compose logs api` |
+| Login klappt, danach wieder die Login-Seite | Browser blockiert Cookies für die LXC-IP | Cookies für `http://<LXC-IP>:8080` erlauben |
 
 Erlaubte Regeln werden am Namen erkannt (`-A-`, „allow“, „accept“). Taucht in deinen Logs ein
 anderes Muster auf, ist das eine Zeile im `blocked`-Transform in `collector/vector.yaml`.
@@ -360,15 +403,15 @@ docker-compose.yml        Container, Härtung, RAM-Limits, Log-Rotation
 install.sh                Installation im LXC: Pakete, Docker, Projekt, Setup, Selbsttest
 proxmox/create-lxc.sh     auf dem Proxmox-Host: LXC anlegen und install.sh darin starten
 proxmox/update-lxc.sh     auf dem Proxmox-Host: neuen Stand in den LXC kopieren und neu starten
-lagezentrum.sh            setup · test · status · geoip · password · update · logs
+lagezentrum.sh            setup · test · status · geoip · password (Login) · update · logs
 collector/Dockerfile      Vector + GoFlow2 in einem Image
 collector/vector.yaml     Pipeline: Klassifizierung, Syslog-Parser, GeoIP, Senken
 config/hosts.example.csv  Vorlage für Gerätenamen
 caddy/Caddyfile           Webserver, LAN-Sperre, Sicherheits-Header
-caddy/auth/               hier landet die optionale Basic-Auth
+caddy/auth/               nur noch für ein altes Basic Auth früherer Versionen
 scripts/geoip-update.sh   GeoIP-Download (läuft im geoip-Container)
-api/                      Namens-API (Go, nur Standardbibliothek)
-web/                      Dashboard (index.html, app.js, app.css) + vendor/ (globe.gl, Texturen, Schriften)
+api/                      Login + Namens-API (Go, nur Standardbibliothek)
+web/                      Dashboard (index.html, app.js, app.css), Login-Seite (login.*) + vendor/ (globe.gl, Texturen, Schriften)
 geoip/                    heruntergeladene Datenbanken (nicht im Git)
 ```
 

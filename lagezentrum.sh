@@ -4,7 +4,7 @@
 #   ./lagezentrum.sh test         Selbsttest: Test-Flow + Test-Syslog schicken und prüfen
 #   ./lagezentrum.sh status       Container, Datenmenge, Ereignisse der letzten Stunde
 #   ./lagezentrum.sh geoip        GeoIP-Datenbanken jetzt aktualisieren (läuft monatlich per Cron)
-#   ./lagezentrum.sh password     Passwortschutz setzen   (password off = entfernen)
+#   ./lagezentrum.sh password     Login-Passwort setzen   (password logout = alle abmelden, password off = Login aus)
 #   ./lagezentrum.sh update       Images aktualisieren und neu starten
 #   ./lagezentrum.sh logs         Logs aller Container verfolgen
 set -euo pipefail
@@ -23,6 +23,10 @@ need_docker() {
 env_get() { grep -E "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2- || true; }
 env_set() {
   if grep -qE "^$1=" .env; then sed -i "s|^$1=.*|$1=$2|" .env; else echo "$1=$2" >> .env; fi
+}
+gen_secret() { head -c 32 /dev/urandom | od -An -vtx1 | tr -d ' \n'; }
+ensure_secret() {
+  if [ -z "$(env_get AUTH_SECRET)" ]; then env_set AUTH_SECRET "$(gen_secret)"; c_ok "Schlüssel für Login-Sitzungen angelegt (AUTH_SECRET)"; fi
 }
 lxc_ip() { hostname -I 2>/dev/null | awk '{print $1}'; }
 vlq() { curl -fsS --max-time 10 http://127.0.0.1:9428/select/logsql/query --data-urlencode "query=$1"; }
@@ -84,6 +88,7 @@ cmd_setup() {
     cp config/hosts.example.csv config/hosts.csv
     c_ok "config/hosts.csv angelegt – trag dort deine Geräte ein (IP,Name)"
   fi
+  ensure_secret
   chmod 600 .env
   chmod 644 config/hosts.csv collector/vector.yaml caddy/Caddyfile
   mkdir -p geoip caddy/auth
@@ -108,6 +113,19 @@ EOF
   fi
   sleep 3
   docker compose ps
+  if [ -z "$(env_get AUTH_PASSWORD_HASH)" ]; then
+    local yn=n
+    if [ -z "${LZ_NONINTERACTIVE:-}" ] && { : </dev/tty; } 2>/dev/null; then
+      echo
+      read -rp "Login-Passwort fürs Dashboard jetzt setzen? [J/n]: " yn </dev/tty || yn=n
+      yn=${yn:-j}
+    fi
+    if [[ "$yn" =~ ^[JjYy] ]]; then
+      ( cmd_password ) </dev/tty || c_warn "Passwort nicht gesetzt – später: ./lagezentrum.sh password"
+    else
+      c_warn "Kein Login-Passwort gesetzt – jeder im LAN sieht das Dashboard. Setzen: ./lagezentrum.sh password"
+    fi
+  fi
   local ip; ip=$(lxc_ip)
   echo
   c_ok "Fertig. Dashboard: http://${ip:-<LXC-IP>}:$(env_get HTTP_PORT || echo 8080)   Demo: …/?demo"
@@ -143,8 +161,16 @@ cmd_test() {
   [ "${blk:-0}" -gt 0 ] && c_ok "Syslog-Pfad: Vector -> VictoriaLogs funktioniert" || c_err "Syslog-Test nicht angekommen (docker compose logs collector)"
   local geo; geo=$(vlq "_time:5m dir:blocked rule:\"Selbsttest $marker\" | fields r_country" 2>/dev/null | head -1)
   [[ "$geo" == *'"US"'* ]] && c_ok "GeoIP funktioniert (45.33.32.156 -> US)" || c_warn "GeoIP-Zuordnung fehlt ($geo)"
-  local code; code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$(env_get HTTP_PORT || echo 8080)/" || true)
-  [ "$code" = 200 ] || [ "$code" = 401 ] && c_ok "Dashboard antwortet (HTTP $code)" || c_err "Dashboard antwortet nicht (HTTP $code)"
+  local port; port=$(env_get HTTP_PORT | grep . || echo 8080)
+  local code; code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/" || true)
+  if [ -n "$(env_get AUTH_PASSWORD_HASH)" ]; then
+    local lcode; lcode=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/login.html" || true)
+    [ "$code" = 401 ] && [ "$lcode" = 200 ] && c_ok "Dashboard antwortet, Login aktiv (ohne Anmeldung HTTP $code)" \
+      || c_err "Dashboard/Login antwortet nicht wie erwartet (/: HTTP $code, /login.html: HTTP $lcode – docker compose logs api caddy)"
+  else
+    [ "$code" = 200 ] || [ "$code" = 401 ] && c_ok "Dashboard antwortet (HTTP $code)" || c_err "Dashboard antwortet nicht (HTTP $code)"
+    c_warn "Kein Login-Passwort gesetzt – jeder im LAN sieht das Dashboard (./lagezentrum.sh password)"
+  fi
   echo "Hinweis: Der Testflow taucht als „raus 10.37.10.250 -> 9.9.9.9 (Quad9)“ in der Historie auf."
 }
 
@@ -173,30 +199,56 @@ cmd_geoip() {
   fi
 }
 
+# Login-Passwort: Hash (PBKDF2) und Sitzungs-Schlüssel landen in der .env, die API prüft sie
+api_image() {  # immer bauen (geht dank Cache schnell): ein altes Image kennt hash-password nicht
+  docker compose build api >/dev/null || die "API-Image konnte nicht gebaut werden (docker compose build api)"
+}
+apply_auth() {  # API mit neuer .env starten, Caddy neu laden
+  docker compose up -d api >/dev/null
+  docker compose restart caddy >/dev/null; sleep 1
+}
+remove_basic_auth() {
+  if [ -f caddy/auth/basic_auth.caddy ]; then
+    rm -f caddy/auth/basic_auth.caddy
+    c_ok "Altes Basic Auth (Browser-Passwortfenster) entfernt"
+  fi
+}
+
 cmd_password() {
   need_docker
-  if [ "${1:-}" = "off" ]; then
-    rm -f caddy/auth/basic_auth.caddy
-    docker compose restart caddy >/dev/null; sleep 1
-    c_ok "Passwortschutz entfernt"
-    return
-  fi
-  local user="${1:-}"
-  [ -n "$user" ] || read -rp "Benutzername: " user
-  [[ "$user" =~ ^[A-Za-z0-9._-]+$ ]] || die "Benutzername nur aus Buchstaben, Ziffern, . _ -"
+  [ -f .env ] || die ".env fehlt – erst ./lagezentrum.sh setup"
+  case "${1:-}" in
+    off)
+      env_set AUTH_PASSWORD_HASH ""
+      remove_basic_auth
+      apply_auth
+      c_warn "Login ausgeschaltet – jeder im LAN sieht das Dashboard"
+      return ;;
+    logout)
+      env_set AUTH_SECRET "$(gen_secret)"
+      apply_auth
+      c_ok "Alle Browser abgemeldet (neuer Sitzungs-Schlüssel)"
+      return ;;
+    ""|set) ;;
+    *) die "Unbekannte Option: $1 (password | password logout | password off)" ;;
+  esac
   local pw pw2
-  read -rsp "Passwort: " pw; echo
-  read -rsp "Wiederholen: " pw2; echo
+  IFS= read -rsp "Neues Passwort fürs Dashboard: " pw; echo
+  IFS= read -rsp "Wiederholen: " pw2; echo
   [ "$pw" = "$pw2" ] || die "Passwörter stimmen nicht überein"
   [ ${#pw} -ge 10 ] || die "Bitte mindestens 10 Zeichen"
+  api_image
   local hash
-  hash=$(printf '%s\n' "$pw" | docker compose run --rm -T --no-deps --entrypoint caddy caddy hash-password 2>/dev/null | tail -1)
-  [[ "$hash" == \$2* ]] || die "Hash konnte nicht erzeugt werden"
+  hash=$(printf '%s\n' "$pw" | timeout 120 docker run --rm -i --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges:true lagezentrum-api:local hash-password 2>/dev/null | tail -1)
+  [[ "$hash" == pbkdf2-sha256:* ]] || die "Hash konnte nicht erzeugt werden"
   umask 077
-  printf 'basic_auth {\n\t%s %s\n}\n' "$user" "$hash" > caddy/auth/basic_auth.caddy
-  chmod 644 caddy/auth/basic_auth.caddy
-  docker compose restart caddy >/dev/null; sleep 1
-  c_ok "Passwortschutz aktiv für Benutzer $user"
+  env_set AUTH_PASSWORD_HASH "$hash"
+  ensure_secret
+  chmod 600 .env
+  remove_basic_auth
+  apply_auth
+  c_ok "Login aktiv. Bisherige Anmeldungen sind damit abgemeldet; der Browser bleibt danach 400 Tage angemeldet."
 }
 
 cmd_update() {

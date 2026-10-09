@@ -6,6 +6,9 @@
 //	PUT    /api/names              <- {"ip":"10.37.10.3","name":"homelable"}  (leerer Name = löschen)
 //	DELETE /api/names?ip=10.37.10.3
 //	GET    /api/health
+//
+// Dazu der Login (auth.go): /auth/login, /auth/logout, /auth/session, /auth/check.
+// "lz-api hash-password" liest ein Passwort von stdin und gibt den Hash für die .env aus.
 package main
 
 import (
@@ -174,14 +177,28 @@ func sameOrigin(r *http.Request) bool {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "hash-password" {
+		cmdHashPassword()
+		return
+	}
 	s := &store{path: env("HOSTS_FILE", "/config/hosts.csv")}
 	addr := env("LISTEN", "127.0.0.1:8092")
+	auth := newAuth(os.Getenv("AUTH_PASSWORD_HASH"), os.Getenv("AUTH_SECRET"))
+	switch {
+	case auth.bad != nil:
+		log.Printf("FEHLER: AUTH_PASSWORD_HASH ungültig (%v) – Dashboard gesperrt, bis ./lagezentrum.sh password ein neues Passwort setzt", auth.bad)
+	case auth.enabled:
+		log.Print("Login aktiv")
+	default:
+		log.Print("Kein Login-Passwort gesetzt – das Dashboard ist für das ganze LAN offen (./lagezentrum.sh password)")
+	}
 
 	mux := http.NewServeMux()
+	auth.routes(mux)
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 200, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("GET /api/names", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/names", auth.require(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		m, err := s.load()
 		s.mu.Unlock()
@@ -195,7 +212,7 @@ func main() {
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].IP < out[j].IP })
 		jsonOut(w, 200, out)
-	})
+	}))
 	write := func(w http.ResponseWriter, r *http.Request, ipRaw, nameRaw string) {
 		if !sameOrigin(r) {
 			fail(w, 403, "fremde Herkunft")
@@ -235,7 +252,7 @@ func main() {
 		log.Printf("Name gesetzt: %s = %q", a, name)
 		jsonOut(w, 200, entry{a.String(), name})
 	}
-	mux.HandleFunc("PUT /api/names", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("PUT /api/names", auth.require(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 			fail(w, 415, "JSON erwartet")
 			return
@@ -246,10 +263,10 @@ func main() {
 			return
 		}
 		write(w, r, e.IP, e.Name)
-	})
-	mux.HandleFunc("DELETE /api/names", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("DELETE /api/names", auth.require(func(w http.ResponseWriter, r *http.Request) {
 		write(w, r, r.URL.Query().Get("ip"), "")
-	})
+	}))
 
 	srv := &http.Server{Addr: addr, Handler: mux, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, MaxHeaderBytes: 16 << 10}
 	log.Printf("Lagezentrum-API auf %s, Datei %s", addr, s.path)
