@@ -2,6 +2,7 @@
  * Live-Stream:  /ws          (Vector websocket_server, ein JSON-Objekt pro Nachricht)
  * Historie:     /select/...  (VictoriaLogs, LogsQL)
  * Einstellungen: /config.json (aus der .env, über Caddy)
+ * Login:        /auth/session (Sitzung prüfen und verlängern), /auth/logout
  * Demo ohne Backend: ?demo
  */
 (() => {
@@ -53,6 +54,8 @@
     get(k, d) { try { const v = localStorage.getItem('lz.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
     set(k, v) { try { localStorage.setItem('lz.' + k, JSON.stringify(v)); } catch {} }
   };
+  // Sitzung abgelaufen o. ä.: zur Login-Seite und danach wieder hierher
+  const toLogin = () => location.replace('login.html?next=' + encodeURIComponent(location.pathname + location.search));
   const lq = s => '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';   // LogsQL-Zeichenkette
   const fmtDur = ms => { ms = +ms || 0; if (!ms) return ''; if (ms < 1000) return '<1 s'; const s = Math.round(ms / 1000);
     if (s < 60) return s + ' s'; const m = Math.floor(s / 60); if (m < 60) return m + ' min ' + (s % 60 ? (s % 60) + ' s' : '');
@@ -381,6 +384,7 @@
     const body = new URLSearchParams({ query: q });
     if (limit) body.set('limit', String(limit));
     const r = await fetch(CONFIG.vlUrl, { method: 'POST', body, cache: 'no-store' });
+    if (r.status === 401) toLogin();
     if (!r.ok) {
       const text = (await r.text()).trim().split('\n').slice(-1)[0] || '';
       throw new Error(`VictoriaLogs ${r.status}${text ? ': ' + text.slice(0, 300) : ''}`);
@@ -619,6 +623,7 @@
     fails++;
     const wait = Math.min(30, 2 ** Math.min(fails, 5));
     setStatus('down', `Getrennt · neuer Versuch in ${wait} s`);
+    if (fails >= 2) checkSession();   // WebSocket meldet 401 nicht – Sitzung gezielt prüfen
     if (fails >= 3) showHint('Kein Live-Stream unter /ws. Läuft der Collector? (docker compose ps)', true);
     reconnectTimer = setTimeout(() => { if (!demoTimer) connect(); }, wait * 1000);
   }
@@ -739,6 +744,7 @@
     if (isDemo) return;
     try {
       const r = await fetch('api/names', { cache: 'no-store' });
+      if (r.status === 401) return toLogin();
       if (r.ok) { names.clear(); (await r.json()).forEach(e => names.set(e.ip, e.name)); }
     } catch {}
   }
@@ -746,6 +752,7 @@
     if (isDemo) { if (name) names.set(ip, name); else names.delete(ip); return; }
     const r = await fetch('api/names', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip, name }) });
     const j = await r.json().catch(() => ({}));
+    if (r.status === 401) toLogin();
     if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
     if (j.name) names.set(j.ip, j.name); else names.delete(j.ip);
   }
@@ -1113,11 +1120,30 @@
   $('optAlerts').addEventListener('change', ev => { settings.alerts = ev.target.checked; saveSettings(); });
   $('sparkTitle').addEventListener('click', () => { sparkMode = sparkMode === 'bytes' ? 'hits' : 'bytes'; store.set('sparkMode', sparkMode); renderSpark(); });
 
+  // ---------- Login ----------
+  // Fragt die Sitzung ab und verlängert dabei das Cookie (gleitend, 400 Tage).
+  // Ein Kiosk, der nie neu lädt, bleibt so dauerhaft angemeldet.
+  async function checkSession() {
+    if (isDemo) return null;
+    try {
+      const r = await fetch('auth/session', { cache: 'no-store' });
+      if (!r.ok) return null;
+      const s = await r.json();
+      if (s.enabled && !s.authenticated) toLogin();
+      return s;
+    } catch { return null; }
+  }
+  $('logout').addEventListener('click', async () => {
+    try { await fetch('auth/logout', { method: 'POST', cache: 'no-store' }); } catch {}
+    location.replace('login.html');
+  });
+
   // ---------- Start ----------
   async function loadConfig() {
     if (isDemo) return;
     try {
       const r = await fetch('config.json', { cache: 'no-store' });
+      if (r.status === 401) return toLogin();
       if (!r.ok) return;
       const c = await r.json();
       if (c.home && isFinite(+c.home.lat) && isFinite(+c.home.lng)) CONFIG.home = { lat: +c.home.lat, lng: +c.home.lng, label: String(c.home.label || 'Zuhause') };
@@ -1135,6 +1161,8 @@
     if (isDemo) {
       startDemo();
     } else {
+      checkSession().then(s => { $('logoutRow').hidden = !(s && s.enabled); });
+      setInterval(checkSession, 6 * 3600 * 1000);
       loadNames().then(() => { connect(); loadStats(); });
       loadKnown();
       setInterval(loadStats, CONFIG.statsEveryMs);

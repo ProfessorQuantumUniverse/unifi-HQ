@@ -1,0 +1,38 @@
+@font-face { font-family: "IBM Plex Sans Condensed"; font-weight: 400; font-display: swap; src: url(vendor/fonts/ibm-plex-sans-condensed-400.woff2) format("woff2"); }
+@font-face { font-family: "IBM Plex Sans Condensed"; font-weight: 600; font-display: swap; src: url(vendor/fonts/ibm-plex-sans-condensed-600.woff2) format("woff2"); }
+@font-face { font-family: "IBM Plex Mono"; font-weight: 500; font-display: swap; src: url(vendor/fonts/ibm-plex-mono-500.woff2) format("woff2"); }
+
+:root {
+  --ink: #071224; --panel-solid: #0b1a31; --line: #1f3558; --text: #dbe6f3; --mute: #7c92b3;
+  --out: #7fd4ff; --blocked: #ff4d5e; --gold: #f2c14e;
+  --sans: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; color: var(--text); font: 15px/1.4 var(--sans); }
+body {
+  background: radial-gradient(ellipse at 50% 120%, rgba(127,212,255,.14), transparent 60%), url(vendor/night-sky.png) center / cover, var(--ink);
+}
+main { min-height: 100vh; min-height: 100dvh; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.card {
+  width: min(360px, 100%); display: grid; gap: 10px; padding: 24px 22px 20px;
+  background: rgba(11,26,49,.92); border: 1px solid #3a3220; border-radius: 6px;
+  box-shadow: 0 0 0 1px rgba(242,193,78,.08), 0 20px 60px rgba(0,0,0,.5);
+}
+.card img { justify-self: center; margin-bottom: 4px; }
+.kicker { font: 500 11px var(--mono); letter-spacing: .18em; text-transform: uppercase; color: var(--gold); text-align: center; }
+h1 { margin: 0 0 8px; font-size: 24px; font-weight: 600; letter-spacing: .02em; text-align: center; }
+label { font-size: 14px; color: var(--mute); }
+input, button { font: inherit; color: inherit; }
+input[type=password] { background: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 9px 10px; font-size: 16px; width: 100%; }
+input[type=password]:focus { border-color: var(--out); }
+:focus-visible { outline: 2px solid var(--out); outline-offset: 2px; }
+button {
+  border: 1px solid #2b5a8f; background: #12325a; border-radius: 999px;
+  padding: 8px 14px; font-size: 15px; font-weight: 600; cursor: pointer;
+}
+button:hover { border-color: var(--mute); }
+button:disabled { opacity: .6; cursor: progress; }
+.err { color: var(--blocked); font-size: 13px; min-height: 1.2em; }
+small { color: var(--mute); font-size: 12px; text-align: center; }
+.sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); border: 0; }

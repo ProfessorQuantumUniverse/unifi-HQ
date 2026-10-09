@@ -5,7 +5,7 @@
 #
 # Alle Dienste laufen im Host-Netz des LXC:
 #   - UDP 2055 (NetFlow/IPFIX) und UDP 5514 (Syslog) nehmen nur Pakete vom Gateway an
-#   - TCP 8080 (Dashboard) beantwortet nur Clients aus dem lokalen Netz
+#   - TCP 8080 (Dashboard) beantwortet nur Clients aus dem lokalen Netz, mit Login
 #   - VictoriaLogs (9428), der Live-Stream (8090) und GoFlow2-Metriken (8091)
 #     hören nur auf 127.0.0.1 und sind von außen nicht erreichbar
 # Kein Docker-NAT, kein docker-proxy, Absender-IPs bleiben erhalten.
@@ -77,7 +77,8 @@ services:
         condition: service_started
     mem_limit: 384m
 
-  # Kleine API fürs Dashboard: Gerätenamen speichern (config/hosts.csv) und Vector neu laden lassen
+  # Kleine API fürs Dashboard: Login prüfen, Gerätenamen speichern (config/hosts.csv)
+  # und Vector neu laden lassen
   api:
     <<: *hardening
     build: ./api
@@ -88,6 +89,8 @@ services:
     environment:
       HOSTS_FILE: /config/hosts.csv
       LISTEN: 127.0.0.1:8092
+      AUTH_PASSWORD_HASH: ${AUTH_PASSWORD_HASH:-}   # ./lagezentrum.sh password
+      AUTH_SECRET: ${AUTH_SECRET:-}
     volumes:
       - ./config:/config
     depends_on: [collector]
