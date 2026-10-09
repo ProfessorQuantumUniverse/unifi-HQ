@@ -28,7 +28,7 @@ services:
   # Einmal-Job: lädt die DB-IP-Lite-Datenbanken, falls sie fehlen oder älter als 32 Tage sind
   geoip:
     <<: *hardening
-    image: alpine:3.22
+    image: alpine:3.24
     restart: "no"
     cap_add: [DAC_OVERRIDE]
     command: ["/bin/sh", "/update.sh"]
