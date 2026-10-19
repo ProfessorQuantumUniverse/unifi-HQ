@@ -22,7 +22,12 @@
     historyLimit: 500,
     textures: 'vendor/'
   };
-  const COLORS = { out: '#7fd4ff', in: '#5fe0a0', blocked: '#ff4d5e', internal: '#b39cff' };
+  // Richtungsfarben; „cb“ nach Okabe-Ito, auch bei Rot-Grün-Schwäche unterscheidbar
+  const PALETTES = {
+    default: { out: '#7fd4ff', in: '#5fe0a0', blocked: '#ff4d5e', internal: '#b39cff' },
+    cb: { out: '#56b4e9', in: '#f0e442', blocked: '#e8743b', internal: '#cc79a7' }
+  };
+  const COLORS = Object.assign({}, PALETTES.default);
   const VERB = { out: 'raus', in: 'rein', blocked: 'abgewehrt', internal: 'intern' };
   const PORTS = { 20:'FTP-Daten', 21:'FTP', 22:'SSH', 23:'Telnet', 25:'SMTP', 53:'DNS', 67:'DHCP', 69:'TFTP', 80:'HTTP', 81:'HTTP-Alt',
     88:'Kerberos', 110:'POP3', 111:'RPC', 119:'NNTP', 123:'NTP', 135:'MS-RPC', 137:'NetBIOS', 138:'NetBIOS', 139:'NetBIOS', 143:'IMAP',
@@ -62,9 +67,29 @@
     return Math.floor(m / 60) + ' h ' + (m % 60) + ' min'; };
 
   // Benutzer-Einstellungen (Zahnrad oben rechts), pro Browser gespeichert
-  const DEFAULT_SETTINGS = { smooth: true, arcStyle: 'strong', arcRate: 10, choropleth: true, alerts: true };
+  const DEFAULT_SETTINGS = { smooth: true, arcStyle: 'strong', arcRate: 10, choropleth: true, alerts: true,
+    // Oberfläche
+    theme: 'navy', palette: 'default', uiScale: 1, panelAlpha: 0.76, showLeft: true, showRight: true,
+    // Globus
+    view: 'globe', autoRotate: !reduceMotion, rotateSpeed: 0.3, globeStyle: 'night', relief: true, stars: true, atmosphere: true,
+    borders: true, points: true, homeLabel: true, arcHeight: 0.38 };
   const settings = Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {}));
   if (lite) settings.arcRate = Math.min(settings.arcRate, 4);
+
+  // Farbschema, Richtungsfarben, Schriftgröße, Leisten – alles über CSS-Variablen und Klassen
+  function applyUiSettings() {
+    const root = document.documentElement;
+    if (settings.theme === 'navy') delete root.dataset.theme; else root.dataset.theme = settings.theme;
+    Object.assign(COLORS, PALETTES[settings.palette] || PALETTES.default);
+    for (const [k, v] of Object.entries(COLORS)) root.style.setProperty('--' + k, v);
+    root.style.setProperty('--live', COLORS.in);
+    root.style.setProperty('--ui-zoom', String(settings.uiScale));
+    root.style.setProperty('--panel-a', String(settings.panelAlpha));
+    $('left').hidden = !settings.showLeft; $('right').hidden = !settings.showRight;
+    document.body.classList.toggle('no-left', !settings.showLeft);
+    document.body.classList.toggle('no-right', !settings.showRight);
+  }
+  applyUiSettings();
 
   // ---------- Filter ----------
   const DEFAULT_FILTERS = { out: true, in: true, blocked: false, internal: false, dns: false };
@@ -106,53 +131,91 @@
     }
     const H = CONFIG.home;
     world
-      .backgroundColor('#071224')
-      .globeImageUrl(CONFIG.textures + 'earth-night.jpg')
-      .showAtmosphere(true).atmosphereColor('#3d7bd9').atmosphereAltitude(0.16)
+      .atmosphereAltitude(0.16)
       .arcStartLat(d => d.sLat).arcStartLng(d => d.sLng).arcEndLat(d => d.eLat).arcEndLng(d => d.eLng)
-      .arcColor(d => d.color).arcStroke(d => d.stroke).arcAltitudeAutoScale(0.38)
+      .arcColor(d => d.color).arcStroke(d => d.stroke)
       .arcDashLength(d => d.dash).arcDashGap(d => d.gap).arcDashInitialGap(1).arcDashAnimateTime(CONFIG.flightMs)
       .arcsTransitionDuration(0)
       .ringColor(d => t => rgba(d.color, Math.max(0, 1 - t)))
       .ringMaxRadius(d => d.max).ringPropagationSpeed(d => d.speed).ringRepeatPeriod(d => d.period)
       .pointLat(d => d.lat).pointLng(d => d.lng).pointColor(d => rgba(COLORS[d.dir], 0.85))
-      .pointAltitude(0.004).pointRadius(d => 0.12 + Math.min(0.55, Math.log10(d.count + 1) * 0.22))
+      .pointAltitude(0.004).pointRadius(pointRadius)
       .pointsTransitionDuration(0)
-      .pointLabel(d => {
-        const box = el('div');
-        box.textContent = `${flag(d.cc)} ${d.place} · ${nf.format(d.count)}× ${VERB[d.dir]}` + (d.org ? ` · ${d.org}` : '');
-        return box.outerHTML;   // globe.gl erwartet HTML – Inhalt ist hier bereits escaped
-      })
+      .pointLabel(pointLabel)
       .onPointClick(d => d.cc ? openDossier('country', d.cc) : null)
-      .labelsData([H]).labelLat(d => d.lat).labelLng(d => d.lng).labelText(d => d.label)
-      .labelColor(() => '#dbe6f3').labelSize(0.55).labelDotRadius(0.28).labelAltitude(0.006)
-      .pointOfView({ lat: Math.max(-60, Math.min(60, H.lat - 12)), lng: H.lng + 4, altitude: 2.3 }, 0);
+      .labelLat(d => d.lat).labelLng(d => d.lng).labelText(d => d.label)
+      .labelColor(() => cssVar('--text') || '#dbe6f3')
+      .labelSize(0.55).labelDotRadius(0.28).labelAltitude(0.006)
+      .pointOfView(homeView(), 0);
 
-    if (!lite) world.backgroundImageUrl(CONFIG.textures + 'night-sky.png').bumpImageUrl(CONFIG.textures + 'earth-topology.png');
     try { world.renderer().setPixelRatio(lite ? 1 : Math.min(devicePixelRatio || 1, 2)); } catch {}
-    rings.push({ lat: H.lat, lng: H.lng, color: '#7fd4ff', max: 2.5, speed: 1, period: 2600 });
+    rings.push(homeRing = { lat: H.lat, lng: H.lng, color: COLORS.out, max: 2.5, speed: 1, period: 2600 });
 
     const controls = world.controls();
-    controls.autoRotate = !reduceMotion; controls.autoRotateSpeed = 0.3;
     controls.addEventListener('start', () => pauseRotation());
+    applyGlobeSettings();
 
-    const resize = () => { world.width(globeEl.clientWidth).height(globeEl.clientHeight); };
-    addEventListener('resize', resize); resize();
+    addEventListener('resize', resizeGlobe); resizeGlobe();
 
-    // Unsichtbarer Tab: nichts rendern
+    // Unsichtbarer Tab oder flache Karte: nichts rendern
     document.addEventListener('visibilitychange', () => {
-      if (document.hidden) world.pauseAnimation(); else world.resumeAnimation();
+      if (document.hidden) world.pauseAnimation(); else if (settings.view !== 'flat') world.resumeAnimation();
     });
   }
+  // versteckt (flache Karte) wäre die Größe 0 – dann beim Umschalten nachholen
+  function resizeGlobe() { if (world && !globeEl.hidden) world.width(globeEl.clientWidth).height(globeEl.clientHeight); }
+  const pointRadius = d => 0.12 + Math.min(0.55, Math.log10(d.count + 1) * 0.22);   // in Grad
+  function pointLabel(d) {
+    const box = el('div');
+    box.textContent = `${flag(d.cc)} ${d.place} · ${nf.format(d.count)}× ${VERB[d.dir]}` + (d.org ? ` · ${d.org}` : '');
+    return box.outerHTML;   // globe.gl erwartet HTML – Inhalt ist hier bereits escaped
+  }
 
-  let resumeTimer;
+  const cssVar = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const homeView = () => ({ lat: Math.max(-60, Math.min(60, CONFIG.home.lat - 12)), lng: CONFIG.home.lng + 4, altitude: 2.3 });
+  let homeRing = null, nightMap = null;
+
+  // Globus-Einstellungen (⚙ → Globus); auch nach Farbschema- oder Farbwechsel aufrufen
+  function applyGlobeSettings() {
+    flatDirty = true; applyView();
+    if (!world) return;
+    // globe.gl baut bei jedem Setzen neu auf (Texturen laden, Atmosphäre) – nur Änderungen setzen
+    const put = (prop, v) => { if (world[prop]() !== v) world[prop](v); };
+    put('backgroundColor', cssVar('--ink') || '#071224');
+    put('showAtmosphere', settings.atmosphere); put('atmosphereColor', cssVar('--atmo') || '#3d7bd9');
+    put('arcAltitudeAutoScale', settings.arcHeight);
+    put('backgroundImageUrl', !lite && settings.stars ? CONFIG.textures + 'night-sky.png' : null);
+    put('bumpImageUrl', !lite && settings.relief ? CONFIG.textures + 'earth-topology.png' : null);
+    if (world.labelsData().length !== (settings.homeLabel ? 1 : 0)) world.labelsData(settings.homeLabel ? [CONFIG.home] : []);
+    // Textur selbst tauschen: globe.gl entfernt eine geladene Textur nicht, und nach einem
+    // Neuladen bleibt der Globus schwarz. Die Textur wird daher einmal geladen und aufgehoben.
+    const m = world.globeMaterial();
+    if (m.map) nightMap = m.map;
+    if (settings.globeStyle === 'plain') {
+      m.map = null; m.color = (m.color || m.emissive.clone()).set(cssVar('--globe') || '#0d2242'); m.needsUpdate = true;
+    } else if (nightMap) {
+      m.map = nightMap; m.color = (m.color || m.emissive.clone()).set('#ffffff'); m.needsUpdate = true;
+    } else {
+      world.globeImageUrl(CONFIG.textures + 'earth-night.jpg');
+    }
+    const c = world.controls();
+    c.autoRotateSpeed = settings.rotateSpeed;
+    if (!settings.autoRotate) { clearTimeout(resumeTimer); resumeTimer = null; c.autoRotate = false; }
+    else if (!resumeTimer) c.autoRotate = true;
+    if (homeRing) { homeRing.color = COLORS.out; dirty = true; }
+    refreshPoints(); refreshPolys();
+  }
+
+  let resumeTimer = null;
   function pauseRotation(ms = 15000) {
     if (!world) return;
-    const c = world.controls(); c.autoRotate = false; clearTimeout(resumeTimer);
-    if (!reduceMotion) resumeTimer = setTimeout(() => { c.autoRotate = true; }, ms);
+    const c = world.controls(); c.autoRotate = false; clearTimeout(resumeTimer); resumeTimer = null;
+    if (settings.autoRotate) resumeTimer = setTimeout(() => { resumeTimer = null; c.autoRotate = settings.autoRotate; }, ms);
   }
   function focusOn(lat, lng) {
-    if (!world || lat == null || lng == null) return;
+    if (lat == null || lng == null) return;
+    if (settings.view === 'flat') { flatFocus(+lat, +lng); return; }
+    if (!world) return;
     pauseRotation(30000);
     world.pointOfView({ lat: +lat, lng: +lng, altitude: 1.5 }, 1200);
   }
@@ -179,12 +242,12 @@
     const vol = (e.bytes || 0) + (e.down || 0);
     const size = Math.min(1, Math.max(0, (Math.log10(vol + 1) - 3) / 5));
     const stroke = strong ? (e.dir === 'blocked' ? 0.9 : 0.5 + size * 1.3) : (e.dir === 'blocked' ? 0.55 : 0.38);
-    const arc = { sLat: s.lat, sLng: s.lng, eLat: t.lat, eLng: t.lng, stroke,
+    const arc = { t0: Date.now(), sLat: s.lat, sLng: s.lng, eLat: t.lat, eLng: t.lng, stroke,
       color: strong ? [rgba(color, 0.35), color] : [rgba(color, 0.05), color],
       dash: strong ? 0.6 : 0.4, gap: strong ? 1.4 : 2 };
     arcs.push(arc); dirty = true;
     setTimeout(() => {
-      const ring = { lat: t.lat, lng: t.lng, color, max: (e.dir === 'blocked' ? 3.2 : 1.8) * (strong ? 1.4 + size : 1), speed: 2.4, period: 99999 };
+      const ring = { t0: Date.now(), lat: t.lat, lng: t.lng, color, max: (e.dir === 'blocked' ? 3.2 : 1.8) * (strong ? 1.4 + size : 1), speed: 2.4, period: 99999 };
       rings.push(ring); dirty = true;
       setTimeout(() => { const i = rings.indexOf(ring); if (i >= 0) rings.splice(i, 1); dirty = true; }, 1400);
     }, CONFIG.flightMs);
@@ -202,16 +265,18 @@
     }
     s.count++; s.last = Date.now();
   }
+  let pointList = [];
   function refreshPoints() {
-    if (!world) return;
+    if (!world && settings.view !== 'flat') return;
     const cutoff = Date.now() - 15 * 60 * 1000;
     for (const [k, s] of spots) if (s.last < cutoff) spots.delete(k);
     const list = [...spots.values()].filter(s => filters[s.dir]).sort((a, b) => b.count - a.count).slice(0, CONFIG.spotsMax);
-    world.pointsData(list);
+    pointList = settings.points ? list : [];
+    if (world) world.pointsData(pointList);
   }
 
   setInterval(() => {
-    if (!dirty || !world) return; dirty = false;
+    if (!dirty || !world || settings.view === 'flat') return; dirty = false;
     world.arcsData(arcs.slice()); world.ringsData(rings.slice());
   }, 120);
   setInterval(refreshPoints, 2000);
@@ -1016,39 +1081,51 @@
   const countryStats = new Map();             // ISO -> { n, b } der letzten 24 h
   const featureByIso = new Map();
   let polyHover = null, polySelected = null;
+  let countryFeatures = [];
   async function initCountries() {
-    if (!world || lite) return;
+    if (lite) return;
     try {
       const geo = await (await fetch(CONFIG.textures + 'countries.geojson')).json();
       geo.features.forEach(f => { if (f.properties.iso) featureByIso.set(f.properties.iso, f); });
+      countryFeatures = geo.features; flatDirty = true;
+      if (!world) return;
       world
         .polygonsData(geo.features)
         .polygonAltitude(d => d === polyHover || d === polySelected ? 0.012 : 0.004)
         .polygonCapColor(polyColor)
-        .polygonSideColor(() => 'rgba(127,212,255,0.04)')
-        .polygonStrokeColor(d => d === polySelected ? 'rgba(242,193,78,0.9)' : 'rgba(127,212,255,0.14)')
+        .polygonSideColor(() => rgba(COLORS.out, 0.04))
+        .polygonStrokeColor(polyStroke)
         .polygonsTransitionDuration(250)
-        .polygonLabel(d => {
-          const iso = d.properties.iso, s = countryStats.get(iso);
-          const box = el('div');
-          box.append(el('b', null, `${flag(iso)} ${country(iso, d.properties.name)}`), el('br'),
-            s ? `${nf.format(s.n)} Verbindungen · ${fmtBytes(s.b)} (24 h)` : 'keine Verbindungen (24 h)');
-          return box.outerHTML;
-        })
+        .polygonLabel(polyLabel)
         .onPolygonHover(d => { polyHover = d; globeEl.style.cursor = d ? 'pointer' : ''; refreshPolys(); })
         .onPolygonClick(d => { if (d.properties.iso) openDossier('country', d.properties.iso); });
     } catch (err) { console.warn('Länderflächen nicht geladen:', err); }
+  }
+  function polyLabel(d) {
+    const iso = d.properties.iso, s = countryStats.get(iso);
+    const box = el('div');
+    box.append(el('b', null, `${flag(iso)} ${country(iso, d.properties.name)}`), el('br'),
+      s ? `${nf.format(s.n)} Verbindungen · ${fmtBytes(s.b)} (24 h)` : 'keine Verbindungen (24 h)');
+    return box.outerHTML;
   }
   function polyColor(d) {
     if (d === polySelected) return 'rgba(242,193,78,0.35)';
     const s = settings.choropleth ? countryStats.get(d.properties.iso) : null;
     const hover = d === polyHover ? 0.12 : 0;
-    if (!s || !s.n) return `rgba(127,212,255,${0.0 + hover})`;
+    if (!s || !s.n) return rgba(COLORS.out, hover);
     const max = Math.max(...[...countryStats.values()].map(x => x.n), 1);
     const a = 0.08 + 0.42 * Math.log10(s.n + 1) / Math.log10(max + 1);
-    return `rgba(127,212,255,${(a + hover).toFixed(3)})`;
+    return rgba(COLORS.out, (a + hover).toFixed(3));
   }
-  function refreshPolys() { if (world && featureByIso.size) world.polygonCapColor(polyColor).polygonAltitude(world.polygonAltitude()); }
+  function polyStroke(d) {
+    if (d === polySelected) return 'rgba(242,193,78,0.9)';
+    if (!settings.borders) return 'rgba(0,0,0,0)';
+    return rgba(COLORS.out, settings.globeStyle === 'plain' ? 0.32 : 0.14);
+  }
+  function refreshPolys() {
+    flatDirty = true;
+    if (world && featureByIso.size) world.polygonCapColor(polyColor).polygonStrokeColor(polyStroke).polygonSideColor(() => rgba(COLORS.out, 0.04)).polygonAltitude(world.polygonAltitude());
+  }
   function focusCountry(iso) {
     const f = featureByIso.get(iso);
     polySelected = f || null; refreshPolys();
@@ -1060,6 +1137,213 @@
   }
   // Auswahl aufheben, wenn das Dossier zugeht
   new MutationObserver(() => { if (dossier.hidden && polySelected) { polySelected = null; refreshPolys(); } }).observe(dossier, { attributes: true, attributeFilter: ['hidden'] });
+
+  // ---------- Flache Karte (Plattkarte, Canvas 2D) ----------
+  // Zeigt dieselben Bögen, Ringe, Hotspots und Länder wie der Globus. Ziehen verschiebt,
+  // Mausrad zoomt, Klick auf Land oder Punkt öffnet das Dossier. Ost-West läuft endlos weiter.
+  const flatEl = $('flat'), flatTip = $('flatTip');
+  const flat = { ctx: flatEl.getContext('2d'), bg: document.createElement('canvas'), w: 0, h: 0, dpr: 1,
+    lng: CONFIG.home.lng, lat: 20, zoom: 1, img: null, paths: null, raf: 0, anim: null, drag: null, hoverQueued: false };
+  let flatDirty = true;
+
+  function applyView() {
+    const isFlat = settings.view === 'flat';
+    globeEl.hidden = isFlat; flatEl.hidden = !isFlat;
+    if (!isFlat) flatTip.hidden = true;
+    if (world) { if (isFlat) world.pauseAnimation(); else if (!document.hidden) { world.resumeAnimation(); resizeGlobe(); dirty = true; } }
+    if (isFlat && !flat.raf) { flatResize(); flat.raf = requestAnimationFrame(flatFrame); }
+    if (!isFlat && flat.raf) { cancelAnimationFrame(flat.raf); flat.raf = 0; }
+  }
+
+  const flatScale = () => Math.max(flat.w / 360, flat.h / 180) * flat.zoom;   // Pixel pro Grad
+  const wrapLng = l => ((l + 180) % 360 + 360) % 360 - 180;
+  function flatClamp() {
+    const half = flat.h / 2 / flatScale();
+    flat.lat = half >= 90 ? 0 : Math.max(-90 + half, Math.min(90 - half, flat.lat));
+    flat.lng = wrapLng(flat.lng);
+  }
+  // Längengrad -> x für eine der Kopien (k = -1, 0, 1) der Welt
+  const fx = (lng, k = 0) => flat.w / 2 + (lng - flat.lng + k * 360) * flatScale();
+  const fy = lat => flat.h / 2 - (lat - flat.lat) * flatScale();
+  // Kopie, in der ein Punkt der Bildmitte am nächsten liegt
+  const nearK = lng => Math.round((flat.lng - lng) / 360);
+
+  function flatResize() {
+    if (flatEl.hidden) return;
+    flat.dpr = lite ? 1 : Math.min(devicePixelRatio || 1, 2);
+    flat.w = flatEl.clientWidth; flat.h = flatEl.clientHeight;
+    for (const c of [flatEl, flat.bg]) { c.width = Math.round(flat.w * flat.dpr); c.height = Math.round(flat.h * flat.dpr); }
+    flatClamp(); flatDirty = true;
+  }
+  addEventListener('resize', flatResize);
+
+  // Hintergrund: Textur bzw. Fläche plus Länder; nur neu zeichnen, wenn sich etwas ändert
+  function drawFlatStatic() {
+    flatDirty = false;
+    const c = flat.bg.getContext('2d'), sc = flatScale(), d = flat.dpr;
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.fillStyle = cssVar('--ink') || '#071224'; c.fillRect(0, 0, flat.bg.width, flat.bg.height);
+    const night = settings.globeStyle !== 'plain';
+    if (night && !flat.img) { flat.img = new Image(); flat.img.onload = () => { flatDirty = true; }; flat.img.src = CONFIG.textures + 'earth-night.jpg'; }
+    if (!flat.paths && countryFeatures.length) {
+      flat.paths = countryFeatures.map(f => {
+        const path = new Path2D();
+        const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.type === 'MultiPolygon' ? f.geometry.coordinates : [];
+        for (const poly of polys) for (const ring of poly) { ring.forEach(([x, y], i) => i ? path.lineTo(x, y) : path.moveTo(x, y)); path.closePath(); }
+        return { f, path };
+      });
+    }
+    for (const k of [-1, 0, 1]) {
+      const x0 = fx(-180, k), y0 = fy(90);
+      if (x0 > flat.w || x0 + 360 * sc < 0) continue;
+      c.setTransform(d, 0, 0, d, 0, 0);
+      if (night && flat.img && flat.img.complete && flat.img.naturalWidth) c.drawImage(flat.img, x0, y0, 360 * sc, 180 * sc);
+      else { c.fillStyle = cssVar('--globe') || '#0d2242'; c.fillRect(x0, y0, 360 * sc, 180 * sc); }
+      if (!flat.paths) continue;
+      // Länder in Grad zeichnen: x = Länge, y = Breite (nach oben)
+      c.setTransform(sc * d, 0, 0, -sc * d, fx(0, k) * d, fy(0) * d);
+      c.lineWidth = 0.8 / sc; c.lineJoin = 'round';
+      for (const { f, path } of flat.paths) {
+        c.fillStyle = polyColor(f); c.fill(path);
+        c.strokeStyle = polyStroke(f); c.stroke(path);
+      }
+    }
+  }
+
+  // Quadratische Kurve, nach oben gewölbt; Höhe wie „Bogenhöhe“
+  function arcGeom(a) {
+    const k = nearK(a.sLng);
+    const eLng = a.sLng + wrapLng(a.eLng - a.sLng);   // kürzerer Weg, auch über die Datumsgrenze
+    const x0 = fx(a.sLng, k), y0 = fy(a.sLat), x2 = fx(eLng, k), y2 = fy(a.eLat);
+    const dx = x2 - x0, dy = y2 - y0, len = Math.hypot(dx, dy) || 1;
+    let nx = -dy / len, ny = dx / len; if (ny > 0) { nx = -nx; ny = -ny; }
+    const lift = len * settings.arcHeight * 0.9;
+    return { x0, y0, x1: (x0 + x2) / 2 + nx * lift, y1: (y0 + y2) / 2 + ny * lift, x2, y2 };
+  }
+  const bez = (g, t) => { const u = 1 - t; return [u * u * g.x0 + 2 * u * t * g.x1 + t * t * g.x2, u * u * g.y0 + 2 * u * t * g.y1 + t * t * g.y2]; };
+
+  function flatFrame() {
+    flat.raf = requestAnimationFrame(flatFrame);
+    if (document.hidden || !flat.w) return;
+    const now = Date.now();
+    if (flat.anim) {
+      const A = flat.anim, t = Math.min(1, (now - A.t0) / A.ms), e = t < .5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+      flat.lng = A.from.lng + (A.to.lng - A.from.lng) * e; flat.lat = A.from.lat + (A.to.lat - A.from.lat) * e;
+      flat.zoom = A.from.zoom + (A.to.zoom - A.from.zoom) * e;
+      flatClamp(); flatDirty = true;
+      if (t >= 1) flat.anim = null;
+    }
+    if (flatDirty) drawFlatStatic();
+    const c = flat.ctx, sc = flatScale();
+    c.setTransform(1, 0, 0, 1, 0, 0); c.drawImage(flat.bg, 0, 0);
+    c.setTransform(flat.dpr, 0, 0, flat.dpr, 0, 0);
+    // Hotspots
+    for (const p of pointList) {
+      const r = Math.max(1.8, pointRadius(p) * sc * 1.1);
+      c.fillStyle = rgba(COLORS[p.dir], 0.85);
+      c.beginPath(); c.arc(fx(p.lng, nearK(p.lng)), fy(p.lat), r, 0, 7); c.fill();
+    }
+    // Bögen: Leuchtstrich wandert in flightMs von Start zu Ziel
+    c.lineCap = 'round';
+    for (const a of arcs) {
+      const f = (now - a.t0) / CONFIG.flightMs, t1 = Math.min(1, f), t0 = Math.max(0, f - a.dash);
+      if (t1 <= t0) continue;
+      const g = arcGeom(a), steps = 24, tail = bez(g, t0), head = bez(g, t1);
+      const grad = c.createLinearGradient(tail[0], tail[1], head[0], head[1]);
+      grad.addColorStop(0, a.color[0]); grad.addColorStop(1, a.color[1]);
+      c.strokeStyle = grad; c.lineWidth = Math.max(1, a.stroke * 1.8);
+      c.beginPath(); c.moveTo(tail[0], tail[1]);
+      for (let i = 1; i <= steps; i++) { const q = bez(g, t0 + (t1 - t0) * i / steps); c.lineTo(q[0], q[1]); }
+      c.stroke();
+    }
+    // Ringe am Ziel (einmalig) und um Zuhause (wiederkehrend)
+    c.lineWidth = 1.5;
+    for (const r of rings) {
+      const age = r.period < 99999 ? now % r.period : now - (r.t0 || now);
+      const deg = age / 1000 * r.speed;
+      if (deg <= 0 || deg > r.max) continue;
+      c.strokeStyle = rgba(r.color, Math.max(0, 1 - deg / r.max));
+      c.beginPath(); c.arc(fx(r.lng, nearK(r.lng)), fy(r.lat), 2 + deg * Math.min(sc, 10) * 1.5, 0, 7); c.stroke();
+    }
+    if (settings.homeLabel) {
+      const H = CONFIG.home, x = fx(H.lng, nearK(H.lng)), y = fy(H.lat);
+      c.fillStyle = cssVar('--text') || '#dbe6f3';
+      c.beginPath(); c.arc(x, y, 2.5, 0, 7); c.fill();
+      c.font = '500 12px ' + (cssVar('--sans') || 'sans-serif'); c.textBaseline = 'middle';
+      c.fillText(H.label, x + 6, y);
+    }
+  }
+
+  // Was liegt unter dem Mauszeiger? Erst Hotspots, dann Länder
+  function flatHit(mx, my) {
+    const sc = flatScale();
+    for (const p of pointList) {
+      const r = Math.max(1.8, pointRadius(p) * sc * 1.1) + 3;
+      if (Math.hypot(fx(p.lng, nearK(p.lng)) - mx, fy(p.lat) - my) <= r) return { point: p };
+    }
+    if (!flat.paths) return null;
+    const c = flat.bg.getContext('2d'), d = flat.dpr;
+    for (const k of [-1, 0, 1]) {
+      c.setTransform(sc * d, 0, 0, -sc * d, fx(0, k) * d, fy(0) * d);
+      for (const { f, path } of flat.paths) if (c.isPointInPath(path, mx * d, my * d)) return { poly: f };
+    }
+    return null;
+  }
+  function flatHover(ev) {
+    const r = flatEl.getBoundingClientRect(), hit = flatHit(ev.clientX - r.left, ev.clientY - r.top);
+    const poly = hit && hit.poly || null;
+    if (poly !== polyHover) { polyHover = poly; flatDirty = true; }
+    flatEl.style.cursor = hit ? 'pointer' : '';
+    if (!hit) { flatTip.hidden = true; return; }
+    flatTip.innerHTML = hit.point ? pointLabel(hit.point) : polyLabel(hit.poly);   // Inhalt ist escaped
+    flatTip.hidden = false;
+    flatTip.style.left = Math.min(ev.clientX + 14, innerWidth - flatTip.offsetWidth - 8) + 'px';
+    flatTip.style.top = (ev.clientY + 14) + 'px';
+  }
+
+  flatEl.addEventListener('pointerdown', ev => {
+    flatEl.setPointerCapture(ev.pointerId);
+    flat.drag = { x: ev.clientX, y: ev.clientY, lng: flat.lng, lat: flat.lat, moved: false };
+    flat.anim = null;
+  });
+  flatEl.addEventListener('pointermove', ev => {
+    const D = flat.drag;
+    if (D) {
+      const dx = ev.clientX - D.x, dy = ev.clientY - D.y;
+      if (Math.hypot(dx, dy) > 4) D.moved = true;
+      if (!D.moved) return;
+      const sc = flatScale();
+      flat.lng = D.lng - dx / sc; flat.lat = D.lat + dy / sc; flatClamp(); flatDirty = true;
+      flatEl.style.cursor = 'grabbing'; flatTip.hidden = true;
+      return;
+    }
+    if (flat.hoverQueued) return;
+    flat.hoverQueued = true;
+    requestAnimationFrame(() => { flat.hoverQueued = false; flatHover(ev); });
+  });
+  flatEl.addEventListener('pointerup', ev => {
+    const D = flat.drag; flat.drag = null; flatEl.style.cursor = '';
+    if (!D || D.moved) return;
+    const r = flatEl.getBoundingClientRect(), hit = flatHit(ev.clientX - r.left, ev.clientY - r.top);
+    if (hit && hit.point && hit.point.cc) openDossier('country', hit.point.cc);
+    else if (hit && hit.poly && hit.poly.properties.iso) openDossier('country', hit.poly.properties.iso);
+  });
+  flatEl.addEventListener('pointerleave', () => { flatTip.hidden = true; if (polyHover) { polyHover = null; flatDirty = true; } });
+  flatEl.addEventListener('wheel', ev => {
+    ev.preventDefault();
+    const r = flatEl.getBoundingClientRect(), mx = ev.clientX - r.left, my = ev.clientY - r.top;
+    const sc0 = flatScale(), lng = flat.lng + (mx - flat.w / 2) / sc0, lat = flat.lat - (my - flat.h / 2) / sc0;
+    flat.zoom = Math.max(1, Math.min(16, flat.zoom * Math.exp(-ev.deltaY * 0.0015)));
+    const sc = flatScale();   // Punkt unter dem Mauszeiger bleibt stehen
+    flat.lng = lng - (mx - flat.w / 2) / sc; flat.lat = lat + (my - flat.h / 2) / sc;
+    flat.anim = null; flatClamp(); flatDirty = true; flatTip.hidden = true;
+  }, { passive: false });
+
+  function flatFocus(lat, lng, zoom = Math.max(flat.zoom, 3), ms = 1000) {
+    const to = { lng: flat.lng + wrapLng(lng - flat.lng), lat, zoom };
+    flat.anim = { t0: Date.now(), ms: reduceMotion ? 1 : ms, from: { lng: flat.lng, lat: flat.lat, zoom: flat.zoom }, to };
+    flatTip.hidden = true; if (polyHover) { polyHover = null; flatDirty = true; }
+  }
 
   // ---------- Erstkontakt: Land oder Firma zum ersten Mal seit 30 Tagen ----------
   const known = { countries: new Set(), orgs: new Set(), ready: false };
@@ -1103,21 +1387,69 @@
 
   // ---------- Einstellungen ----------
   const setBox = $('settings');
+  const fmtDec = (v, d = 1) => (+v).toFixed(d).replace('.', ',');
+  // Bedienelement -> Einstellung; „ui“ = Oberfläche neu anwenden, „globe“ = Globus neu anwenden
+  const OPTS = [
+    { id: 'optSmooth', key: 'smooth', type: 'check', after: () => { if (!settings.smooth) flushPending(); } },
+    { id: 'optAlerts', key: 'alerts', type: 'check' },
+    { id: 'optTheme', key: 'theme', type: 'select', ui: true, globe: true },
+    { id: 'optPalette', key: 'palette', type: 'select', ui: true, globe: true, after: () => renderSpark() },
+    { id: 'optScale', key: 'uiScale', type: 'select', num: true, ui: true },
+    { id: 'optPanel', key: 'panelAlpha', type: 'range', scale: 100, ui: true, label: 'optPanelVal', fmt: v => Math.round(v * 100) + ' %' },
+    { id: 'optLeft', key: 'showLeft', type: 'check', ui: true },
+    { id: 'optRight', key: 'showRight', type: 'check', ui: true },
+    { id: 'optView', key: 'view', type: 'select', globe: true },
+    { id: 'optRotate', key: 'autoRotate', type: 'check', globe: true, globeOnly: true },
+    { id: 'optRotateSpeed', key: 'rotateSpeed', type: 'range', scale: 10, globe: true, globeOnly: true, label: 'optRotateVal', fmt: v => fmtDec(v) + '×' },
+    { id: 'optGlobe', key: 'globeStyle', type: 'select', globe: true },
+    { id: 'optRelief', key: 'relief', type: 'check', globe: true, liteOff: true, globeOnly: true },
+    { id: 'optStars', key: 'stars', type: 'check', globe: true, liteOff: true, globeOnly: true },
+    { id: 'optAtmo', key: 'atmosphere', type: 'check', globe: true, globeOnly: true },
+    { id: 'optBorders', key: 'borders', type: 'check', globe: true, liteOff: true },
+    { id: 'optChoro', key: 'choropleth', type: 'check', globe: true, liteOff: true },
+    { id: 'optPoints', key: 'points', type: 'check', globe: true },
+    { id: 'optHome', key: 'homeLabel', type: 'check', globe: true },
+    { id: 'optStyle', key: 'arcStyle', type: 'select' },
+    { id: 'optRate', key: 'arcRate', type: 'range', scale: 1, label: 'optRateVal', fmt: v => String(v) },
+    { id: 'optArcH', key: 'arcHeight', type: 'range', scale: 100, globe: true, label: 'optArcHVal', fmt: v => fmtDec(v, 2) }
+  ];
   function syncSettingsUi() {
-    $('optSmooth').checked = settings.smooth;
-    $('optStyle').value = settings.arcStyle;
-    $('optRate').value = settings.arcRate; $('optRateVal').textContent = settings.arcRate;
-    $('optChoro').checked = settings.choropleth; $('optAlerts').checked = settings.alerts;
+    for (const o of OPTS) {
+      const input = $(o.id), v = settings[o.key];
+      if (o.type === 'check') input.checked = !!v;
+      else if (o.type === 'range') input.value = Math.round(v * o.scale);
+      else input.value = String(v);
+      if (o.label) $(o.label).textContent = o.fmt(v);
+      // im Lite-Modus bzw. auf der flachen Karte ohne Wirkung
+      const off = (o.liteOff && lite) || (o.globeOnly && settings.view === 'flat');
+      input.disabled = off;
+      input.closest('.opt').classList.toggle('disabled', off || (o.key === 'rotateSpeed' && !settings.autoRotate));
+    }
+    $('liteInfo').hidden = !lite;
+  }
+  for (const o of OPTS) {
+    $(o.id).addEventListener(o.type === 'range' ? 'input' : 'change', ev => {
+      const t = ev.target;
+      settings[o.key] = o.type === 'check' ? t.checked : o.type === 'range' ? +t.value / o.scale : o.num ? +t.value : t.value;
+      if (o.ui) applyUiSettings();
+      if (o.globe) applyGlobeSettings();
+      if (o.after) o.after();
+      syncSettingsUi(); saveSettings();
+    });
   }
   $('openSettings').addEventListener('click', ev => { ev.stopPropagation(); setBox.hidden = !setBox.hidden; syncSettingsUi(); });
   document.addEventListener('click', ev => { if (!setBox.hidden && !setBox.contains(ev.target)) setBox.hidden = true; });
   document.addEventListener('keydown', ev => { if (ev.key === 'Escape') setBox.hidden = true; });
   const saveSettings = () => store.set('settings', settings);
-  $('optSmooth').addEventListener('change', ev => { settings.smooth = ev.target.checked; if (!settings.smooth) flushPending(); saveSettings(); });
-  $('optStyle').addEventListener('change', ev => { settings.arcStyle = ev.target.value; saveSettings(); });
-  $('optRate').addEventListener('input', ev => { settings.arcRate = +ev.target.value; $('optRateVal').textContent = settings.arcRate; saveSettings(); });
-  $('optChoro').addEventListener('change', ev => { settings.choropleth = ev.target.checked; refreshPolys(); saveSettings(); });
-  $('optAlerts').addEventListener('change', ev => { settings.alerts = ev.target.checked; saveSettings(); });
+  $('resetView').addEventListener('click', () => {
+    if (settings.view === 'flat') flatFocus(20, CONFIG.home.lng, 1);
+    else if (world) { pauseRotation(); world.pointOfView(homeView(), 1200); }
+  });
+  $('resetSettings').addEventListener('click', () => {
+    Object.assign(settings, DEFAULT_SETTINGS);
+    if (lite) settings.arcRate = Math.min(settings.arcRate, 4);
+    applyUiSettings(); applyGlobeSettings(); renderSpark(); syncSettingsUi(); saveSettings();
+  });
   $('sparkTitle').addEventListener('click', () => { sparkMode = sparkMode === 'bytes' ? 'hits' : 'bytes'; store.set('sparkMode', sparkMode); renderSpark(); });
 
   // ---------- Login ----------
@@ -1155,7 +1487,9 @@
     if (isDemo) { CONFIG.home = { lat: 50.11, lng: 8.68, label: 'Frankfurt' }; CONFIG.gateway = 'QuantumGateway'; }
     $('gwName').textContent = CONFIG.gateway;
     document.title = 'Lagezentrum' + (CONFIG.gateway ? ' · ' + CONFIG.gateway : '');
+    flat.lng = CONFIG.home.lng;
     initGlobe();
+    applyView();
     initCountries();
     applyFilters();
     if (isDemo) {

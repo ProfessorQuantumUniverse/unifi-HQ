@@ -11,6 +11,8 @@
 </head>
 <body>
 <div id="globe" role="img" aria-label="Weltkarte mit Live-Verbindungen"></div>
+<canvas id="flat" hidden role="img" aria-label="Flache Weltkarte mit Live-Verbindungen"></canvas>
+<div class="flat-tip float-tooltip-kap" id="flatTip" hidden></div>
 
 <header>
   <h1>Lagezentrum<small id="gwName"></small></h1>
@@ -27,13 +29,52 @@
   <button class="tool" id="openHistory" title="Verlauf durchsuchen (/)">Verlauf</button>
   <button class="tool icon" id="openSettings" title="Einstellungen" aria-label="Einstellungen" aria-controls="settings">⚙</button>
   <div class="settings" id="settings" hidden role="dialog" aria-label="Einstellungen">
-    <label class="opt"><input type="checkbox" id="optSmooth"> <span><b>Gleichmäßig abspielen</b><br><small>Das Gateway schickt Flows gebündelt. Puffern und im echten Takt abspielen, mit wenigen Sekunden Versatz. <span id="delayInfo"></span></small></span></label>
-    <label class="opt"><span><b>Bögen</b></span>
-      <select id="optStyle"><option value="strong">kräftig, Dicke nach Datenmenge</option><option value="subtle">dezent</option></select></label>
-    <label class="opt"><span><b>Bögen pro Sekunde</b> <span id="optRateVal"></span></span>
-      <input type="range" id="optRate" min="2" max="30" step="1"></label>
-    <label class="opt check"><input type="checkbox" id="optChoro"> <span><b>Länder einfärben</b><br><small>Je mehr Verbindungen in 24 h, desto heller das Land.</small></span></label>
-    <label class="opt check"><input type="checkbox" id="optAlerts"> <span><b>Erstkontakt melden</b><br><small>Hinweis, wenn ein Gerät ein Land oder eine Firma zum ersten Mal seit 30 Tagen kontaktiert.</small></span></label>
+    <div class="set-group">
+      <h3>Live</h3>
+      <label class="opt check"><input type="checkbox" id="optSmooth"> <span><b>Gleichmäßig abspielen</b><br><small>Das Gateway schickt Flows gebündelt. Puffern und im echten Takt abspielen, mit wenigen Sekunden Versatz. <span id="delayInfo"></span></small></span></label>
+      <label class="opt check"><input type="checkbox" id="optAlerts"> <span><b>Erstkontakt melden</b><br><small>Hinweis, wenn ein Gerät ein Land oder eine Firma zum ersten Mal seit 30 Tagen kontaktiert.</small></span></label>
+    </div>
+
+    <div class="set-group">
+      <h3>Oberfläche</h3>
+      <label class="opt row"><span><b>Farbschema</b></span>
+        <select id="optTheme"><option value="navy">Nachtblau</option><option value="graphite">Graphit</option><option value="black">Schwarz (OLED)</option></select></label>
+      <label class="opt row"><span><b>Richtungsfarben</b></span>
+        <select id="optPalette"><option value="default">Standard</option><option value="cb">farbenblind-freundlich</option></select></label>
+      <label class="opt row"><span><b>Schriftgröße</b></span>
+        <select id="optScale"><option value="0.9">klein</option><option value="1">normal</option><option value="1.15">groß</option><option value="1.3">sehr groß</option></select></label>
+      <label class="opt"><span><b>Deckkraft der Leisten</b> <span id="optPanelVal"></span></span>
+        <input type="range" id="optPanel" min="30" max="100" step="5"></label>
+      <label class="opt check"><input type="checkbox" id="optLeft"> <span><b>Statistik links</b></span></label>
+      <label class="opt check"><input type="checkbox" id="optRight"> <span><b>Live-Ticker rechts</b></span></label>
+    </div>
+
+    <div class="set-group">
+      <h3>Karte</h3>
+      <label class="opt row"><span><b>Ansicht</b></span>
+        <select id="optView"><option value="globe">Globus (3D)</option><option value="flat">flache Karte</option></select></label>
+      <label class="opt check"><input type="checkbox" id="optRotate"> <span><b>Automatisch drehen</b><br><small>Pausiert kurz, wenn du den Globus bewegst.</small></span></label>
+      <label class="opt"><span><b>Drehgeschwindigkeit</b> <span id="optRotateVal"></span></span>
+        <input type="range" id="optRotateSpeed" min="1" max="20" step="1"></label>
+      <label class="opt row"><span><b>Oberfläche</b></span>
+        <select id="optGlobe"><option value="night">Nachtlichter</option><option value="plain">schlicht</option></select></label>
+      <label class="opt check"><input type="checkbox" id="optRelief"> <span><b>Relief</b></span></label>
+      <label class="opt check"><input type="checkbox" id="optStars"> <span><b>Sternenhimmel</b></span></label>
+      <label class="opt check"><input type="checkbox" id="optAtmo"> <span><b>Atmosphäre</b></span></label>
+      <label class="opt check"><input type="checkbox" id="optBorders"> <span><b>Ländergrenzen</b></span></label>
+      <label class="opt check"><input type="checkbox" id="optChoro"> <span><b>Länder einfärben</b><br><small>Je mehr Verbindungen in 24 h, desto heller das Land.</small></span></label>
+      <label class="opt check"><input type="checkbox" id="optPoints"> <span><b>Hotspots</b><br><small>Punkte für Gegenstellen der letzten 15 Minuten.</small></span></label>
+      <label class="opt check"><input type="checkbox" id="optHome"> <span><b>Zuhause beschriften</b></span></label>
+      <label class="opt row"><span><b>Bögen</b></span>
+        <select id="optStyle"><option value="strong">kräftig, Dicke nach Datenmenge</option><option value="subtle">dezent</option></select></label>
+      <label class="opt"><span><b>Bögen pro Sekunde</b> <span id="optRateVal"></span></span>
+        <input type="range" id="optRate" min="2" max="30" step="1"></label>
+      <label class="opt"><span><b>Bogenhöhe</b> <span id="optArcHVal"></span></span>
+        <input type="range" id="optArcH" min="10" max="80" step="2"></label>
+      <small id="liteInfo" hidden>Lite-Modus (<code>?lite</code>): Relief, Sterne und Länderflächen sind aus.</small>
+    </div>
+
+    <div class="opt actions"><button type="button" class="tool" id="resetView">Ansicht auf Zuhause</button><button type="button" class="tool" id="resetSettings">Alles zurücksetzen</button></div>
     <div class="opt account" id="logoutRow" hidden><button type="button" class="tool" id="logout">Abmelden</button><small>Meldet nur diesen Browser ab.</small></div>
   </div>
   <div class="clock" id="clock">--:--:--</div>
