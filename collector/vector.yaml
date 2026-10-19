@@ -233,8 +233,9 @@ transforms:
           string(c.UNIFIruleAction) ?? "", string(c.UNIFIpolicyAction) ?? ""
         ], " ") ?? "")
         if match(action, r'\b(allow|allowed|accept|accepted|pass|passed)\b') { abort }
-        src = string(c.src) ?? (string(c.sourceAddress) ?? "")
-        dst = string(c.dst) ?? (string(c.destinationAddress) ?? "")
+        # Network 10.x lässt src= bei Client-Ereignissen weg und nennt die Quelle nur in UNIFIsrcClientIp
+        src = string(c.src) ?? (string(c.sourceAddress) ?? (string(c.UNIFIsrcClientIp) ?? (string(c.UNIFIsrcIp) ?? "")))
+        dst = string(c.dst) ?? (string(c.destinationAddress) ?? (string(c.UNIFIdstClientIp) ?? (string(c.UNIFIdstIp) ?? "")))
         sp = to_int(c.spt) ?? 0
         dp = to_int(c.dpt) ?? 0
         proto = string(c.proto) ?? ""
