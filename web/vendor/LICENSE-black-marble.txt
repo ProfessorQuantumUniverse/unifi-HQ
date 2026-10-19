@@ -1,0 +1,8 @@
+Nachttextur: NASA Earth Observatory, "Black Marble 2016" (BlackMarble_2016_3km.jpg),
+Suomi NPP VIIRS. NASA-Bildmaterial ist gemeinfrei (public domain).
+NASA Earth Observatory images by Joshua Stevens, using Suomi NPP VIIRS data from
+Miguel Román, NASA's Goddard Space Flight Center.
+https://earthobservatory.nasa.gov/features/NightLights
+
+black-marble.jpg: auf 4096 x 2048 verkleinert.
+night/1/: 8192 x 4096, night/2/: 13312 x 6656, jeweils in 512-px-Kacheln <zeile>-<spalte>.jpg.

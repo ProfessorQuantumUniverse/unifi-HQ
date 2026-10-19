@@ -218,7 +218,7 @@ der Historie landen (inkl. GeoIP). Danach:
 | **Filter-Chips** | Raus / Rein (an), Abgewehrt / Intern (aus), DNS (aus). Die Auswahl merkt sich der Browser. |
 | **Ticker** | Pro Verbindung Upload ↑, Download ↓ und Dauer. Beim Überfahren: ✎ Namen vergeben, Dossier zu Gerät, Land, Firma oder IP. Klick zoomt zum Ort; Doppelklick öffnet den Verlauf dieser IP. Oben: Verbindungen und Datenmenge pro Minute. |
 | **Linke Spalte** | 24-h-Zähler mit Datenvolumen, Anzahl Ziele/Firmen/Länder/Geräte, Stundengrafik (Klick auf den Titel schaltet zwischen Verbindungen und Datenmenge um), Top-Ziele, Länder, Dienste, größte und längste Verbindungen, Geräte. Länder, Firmen und Geräte öffnen ihr Dossier, der Rest den Verlauf. |
-| **Globus / Karte** | Länder sind nach Verkehr der letzten 24 h eingefärbt (abschaltbar). Klick auf ein Land oder einen Hotspot-Punkt öffnet das Länder-Dossier. Die flache Karte (⚙ → Karte → Ansicht) zeigt dasselbe als Plattkarte: Ziehen verschiebt, Mausrad zoomt. |
+| **Globus / Karte** | Länder sind nach Verkehr der letzten 24 h eingefärbt (abschaltbar). Klick auf ein Land oder einen Hotspot-Punkt öffnet das Länder-Dossier. Die flache Karte (⚙ → Karte → Ansicht) zeigt dasselbe als Plattkarte: Ziehen verschiebt, Mausrad zoomt. Beim Hineinzoomen lädt sie detailliertere Grenzen (1:50m) und schärfere Textur-Kacheln, jeweils nur für den sichtbaren Ausschnitt. |
 | **Dossier** | Für ein Land, ein Gerät, eine Firma oder eine einzelne IP: Kennzahlen (Verbindungen, Datenmenge, IPs, Geräte, erster/letzter Kontakt, Abgewehrt), Zeitachse, Top-Listen und alle Verbindungspaare **Quelle → Ziel** mit Dienst, Anzahl und Datenmenge. Zeitraum 1 h bis 30 Tage. Klick auf ein Paar öffnet die Einzelverbindungen. |
 | **Länder** | Alle Länder als sortierbare Tabelle (Verbindungen, Daten, Geräte, IPs, Abgewehrt) – Klick öffnet das Dossier. |
 | **Geräte** | Alle Adressen mit Verkehr, Namen vergeben oder löschen (✎), auch für externe IPs (*+ Name für IP*, z. B. dein VPS). Namen gelten sofort im Dashboard, für alle neuen Einträge der Historie, und die Suche nach einem Namen findet auch ältere Einträge dieser IP. |
@@ -241,7 +241,7 @@ Felder: `dir` (out/in/blocked/internal), `leg`, `proto`, `local_ip`, `local_name
 `http://<LXC-IP>:8080/select/vmui/`.
 
 URL-Optionen: `?demo` (Beispieldaten), `?lite` (für schwache Geräte wie einen Pi-Kiosk: ohne
-Relief und Sternenhimmel, weniger Bögen).
+Relief, Sternenhimmel und Länderflächen, weniger Bögen; die flache Karte bleibt bei der Basistextur).
 
 ---
 
@@ -417,4 +417,6 @@ geoip/                    heruntergeladene Datenbanken (nicht im Git)
 
 IP-Geolokation: [DB-IP.com](https://db-ip.com) Lite, CC BY 4.0. globe.gl: MIT. IBM Plex: SIL OFL 1.1.
 Flaggen: Twemoji Country Flags (Code MIT, Grafiken [Twemoji](https://github.com/twitter/twemoji) CC BY 4.0) –
-damit erscheinen Flaggen auch unter Windows. Ländergrenzen: [Natural Earth](https://www.naturalearthdata.com), gemeinfrei.
+damit erscheinen Flaggen auch unter Windows. Ländergrenzen: [Natural Earth](https://www.naturalearthdata.com) 1:110m und 1:50m, gemeinfrei.
+Nachttextur: [NASA Earth Observatory, Black Marble 2016](https://earthobservatory.nasa.gov/features/NightLights)
+(Suomi NPP VIIRS), gemeinfrei.

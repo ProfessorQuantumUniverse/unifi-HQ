@@ -196,7 +196,7 @@
     } else if (nightMap) {
       m.map = nightMap; m.color = (m.color || m.emissive.clone()).set('#ffffff'); m.needsUpdate = true;
     } else {
-      world.globeImageUrl(CONFIG.textures + 'earth-night.jpg');
+      world.globeImageUrl(CONFIG.textures + 'black-marble.jpg');
     }
     const c = world.controls();
     c.autoRotateSpeed = settings.rotateSpeed;
@@ -1108,17 +1108,19 @@
       s ? `${nf.format(s.n)} Verbindungen · ${fmtBytes(s.b)} (24 h)` : 'keine Verbindungen (24 h)');
     return box.outerHTML;
   }
+  // Globus (1:110m) und flache Karte (1:50m) haben eigene Objekte – daher über den ISO-Code vergleichen
+  const sameCountry = (a, b) => !!a && !!b && (a === b || (!!a.properties.iso && a.properties.iso === b.properties.iso));
   function polyColor(d) {
-    if (d === polySelected) return 'rgba(242,193,78,0.35)';
+    if (sameCountry(d, polySelected)) return 'rgba(242,193,78,0.35)';
     const s = settings.choropleth ? countryStats.get(d.properties.iso) : null;
-    const hover = d === polyHover ? 0.12 : 0;
+    const hover = sameCountry(d, polyHover) ? 0.12 : 0;
     if (!s || !s.n) return rgba(COLORS.out, hover);
     const max = Math.max(...[...countryStats.values()].map(x => x.n), 1);
     const a = 0.08 + 0.42 * Math.log10(s.n + 1) / Math.log10(max + 1);
     return rgba(COLORS.out, (a + hover).toFixed(3));
   }
   function polyStroke(d) {
-    if (d === polySelected) return 'rgba(242,193,78,0.9)';
+    if (sameCountry(d, polySelected)) return 'rgba(242,193,78,0.9)';
     if (!settings.borders) return 'rgba(0,0,0,0)';
     return rgba(COLORS.out, settings.globeStyle === 'plain' ? 0.32 : 0.14);
   }
@@ -1145,6 +1147,13 @@
   const flat = { ctx: flatEl.getContext('2d'), bg: document.createElement('canvas'), w: 0, h: 0, dpr: 1,
     lng: CONFIG.home.lng, lat: 20, zoom: 1, img: null, paths: null, raf: 0, anim: null, drag: null, hoverQueued: false };
   let flatDirty = true;
+  const FLAT_MAX_ZOOM = 12;
+  // Nachttextur (NASA Black Marble) in Stufen: 0 = Basisbild 4096 × 2048, darüber 512-px-Kacheln
+  // unter vendor/night/<stufe>/<zeile>-<spalte>.jpg. Geladen wird nur, was im Ausschnitt liegt.
+  const NIGHT = [{ ppd: 4096 / 360 }, { ppd: 8192 / 360, cols: 16, rows: 8 }, { ppd: 13312 / 360, cols: 26, rows: 13 }];
+  const tileCache = new Map();   // zuletzt benutzte Kacheln hinten; begrenzt auf 300
+  // Grenzen 1:50m für die Nahansicht, erst beim ersten Hineinzoomen geladen
+  const detail = { paths: null, loading: false };
 
   function applyView() {
     const isFlat = settings.view === 'flat';
@@ -1177,38 +1186,103 @@
   }
   addEventListener('resize', flatResize);
 
+  // Länderpfade in Grad (x = Länge, y = Breite) mit Begrenzungsrahmen fürs Aussortieren
+  function buildPaths(features) {
+    return features.map(f => {
+      const path = new Path2D(), box = [180, 90, -180, -90];
+      const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.type === 'MultiPolygon' ? f.geometry.coordinates : [];
+      for (const poly of polys) for (const ring of poly) {
+        ring.forEach(([x, y], i) => {
+          if (i) path.lineTo(x, y); else path.moveTo(x, y);
+          if (x < box[0]) box[0] = x; if (y < box[1]) box[1] = y; if (x > box[2]) box[2] = x; if (y > box[3]) box[3] = y;
+        });
+        path.closePath();
+      }
+      return { f, path, box };
+    });
+  }
+  function flatPaths() {
+    if (flat.zoom >= 2 && !lite) {
+      if (detail.paths) return detail.paths;
+      if (!detail.loading) {
+        detail.loading = true;
+        fetch(CONFIG.textures + 'countries-50m.geojson').then(r => r.json())
+          .then(g => { detail.paths = buildPaths(g.features); flatDirty = true; })
+          .catch(err => console.warn('Detailgrenzen nicht geladen:', err));
+      }
+    }
+    if (!flat.paths && countryFeatures.length) flat.paths = buildPaths(countryFeatures);
+    return flat.paths;
+  }
+  // Sichtbarer Ausschnitt der Kopie k in Grad
+  function flatView(k) {
+    const sc = flatScale(), lng = flat.lng - k * 360;
+    return { w: lng - flat.w / 2 / sc, e: lng + flat.w / 2 / sc, n: flat.lat + flat.h / 2 / sc, s: flat.lat - flat.h / 2 / sc };
+  }
+  const inView = (b, v) => b[2] >= v.w && b[0] <= v.e && b[3] >= v.s && b[1] <= v.n;
+
+  function nightTile(z, y, x, load) {
+    const key = z + '/' + y + '-' + x;
+    let img = tileCache.get(key);
+    if (img) { tileCache.delete(key); tileCache.set(key, img); return img; }
+    if (!load) return null;
+    img = new Image(); img.onload = () => { flatDirty = true; };
+    img.src = CONFIG.textures + 'night/' + key + '.jpg';
+    tileCache.set(key, img);
+    if (tileCache.size > 300) tileCache.delete(tileCache.keys().next().value);
+    return img;
+  }
+  // Kacheln einer Stufe im Ausschnitt, in Geräte-Pixeln und gerundet (sonst feine Fugen zwischen Kacheln)
+  function drawTiles(c, z, k, v, load) {
+    const L = NIGHT[z], tw = 360 / L.cols, th = 180 / L.rows, d = flat.dpr;
+    const x0 = Math.max(0, Math.floor((v.w + 180) / tw)), x1 = Math.min(L.cols - 1, Math.floor((v.e + 180) / tw));
+    const y0 = Math.max(0, Math.floor((90 - v.n) / th)), y1 = Math.min(L.rows - 1, Math.floor((90 - v.s) / th));
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+      const img = nightTile(z, y, x, load);
+      if (!img || !img.complete || !img.naturalWidth) continue;
+      const l = Math.round(fx(-180 + x * tw, k) * d), r = Math.round(fx(-180 + (x + 1) * tw, k) * d);
+      const t = Math.round(fy(90 - y * th) * d), b = Math.round(fy(90 - (y + 1) * th) * d);
+      c.drawImage(img, l, t, r - l, b - t);
+    }
+  }
+
   // Hintergrund: Textur bzw. Fläche plus Länder; nur neu zeichnen, wenn sich etwas ändert
   function drawFlatStatic() {
     flatDirty = false;
     const c = flat.bg.getContext('2d'), sc = flatScale(), d = flat.dpr;
     c.setTransform(1, 0, 0, 1, 0, 0);
+    c.imageSmoothingQuality = 'high';
     c.fillStyle = cssVar('--ink') || '#071224'; c.fillRect(0, 0, flat.bg.width, flat.bg.height);
     const night = settings.globeStyle !== 'plain';
-    if (night && !flat.img) { flat.img = new Image(); flat.img.onload = () => { flatDirty = true; }; flat.img.src = CONFIG.textures + 'earth-night.jpg'; }
-    if (!flat.paths && countryFeatures.length) {
-      flat.paths = countryFeatures.map(f => {
-        const path = new Path2D();
-        const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.type === 'MultiPolygon' ? f.geometry.coordinates : [];
-        for (const poly of polys) for (const ring of poly) { ring.forEach(([x, y], i) => i ? path.lineTo(x, y) : path.moveTo(x, y)); path.closePath(); }
-        return { f, path };
-      });
-    }
+    if (night && !flat.img) { flat.img = new Image(); flat.img.onload = () => { flatDirty = true; }; flat.img.src = CONFIG.textures + 'black-marble.jpg'; }
+    // feinste Stufe, die mindestens so scharf ist wie die Anzeige
+    let z = 0; while (z < NIGHT.length - 1 && NIGHT[z].ppd < sc * d * 0.9) z++;
+    if (lite) z = 0;
+    const paths = flatPaths();
+    // Einfärbung beim Hineinzoomen etwas zurücknehmen, damit die Lichter durchscheinen
+    const fillAlpha = Math.max(0.45, 1 - (flat.zoom - 1) * 0.08);
     for (const k of [-1, 0, 1]) {
-      const x0 = fx(-180, k), y0 = fy(90);
-      if (x0 > flat.w || x0 + 360 * sc < 0) continue;
-      c.setTransform(d, 0, 0, d, 0, 0);
-      if (night && flat.img && flat.img.complete && flat.img.naturalWidth) c.drawImage(flat.img, x0, y0, 360 * sc, 180 * sc);
-      else { c.fillStyle = cssVar('--globe') || '#0d2242'; c.fillRect(x0, y0, 360 * sc, 180 * sc); }
-      if (!flat.paths) continue;
-      // Länder in Grad zeichnen: x = Länge, y = Breite (nach oben)
+      const l = Math.round(fx(-180, k) * d), r = Math.round(fx(180, k) * d), t = Math.round(fy(90) * d), b = Math.round(fy(-90) * d);
+      if (l > flat.bg.width || r < 0) continue;
+      const v = flatView(k);
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      if (night && flat.img && flat.img.complete && flat.img.naturalWidth) {
+        c.drawImage(flat.img, l, t, r - l, b - t);
+        // gröbere Stufen nur aus dem Speicher als Unterlage, die benötigte Stufe wird geladen
+        for (let lz = 1; lz <= z; lz++) drawTiles(c, lz, k, v, lz === z);
+      } else { c.fillStyle = cssVar('--globe') || '#0d2242'; c.fillRect(l, t, r - l, b - t); }
+      if (!paths) continue;
       c.setTransform(sc * d, 0, 0, -sc * d, fx(0, k) * d, fy(0) * d);
       c.lineWidth = 0.8 / sc; c.lineJoin = 'round';
-      for (const { f, path } of flat.paths) {
-        c.fillStyle = polyColor(f); c.fill(path);
-        c.strokeStyle = polyStroke(f); c.stroke(path);
+      for (const { f, path, box } of paths) {
+        if (!inView(box, v)) continue;
+        c.globalAlpha = fillAlpha; c.fillStyle = polyColor(f); c.fill(path);
+        c.globalAlpha = 1; c.strokeStyle = polyStroke(f); c.stroke(path);
       }
     }
   }
+  // Hotspot-Größe in Pixeln: nach Anzahl, wächst beim Zoomen nur leicht mit
+  const flatPointR = p => (2 + Math.min(4.5, Math.log10(p.count + 1) * 2.2)) * flat.zoom ** 0.25;
 
   // Quadratische Kurve, nach oben gewölbt; Höhe wie „Bogenhöhe“
   function arcGeom(a) {
@@ -1239,7 +1313,7 @@
     c.setTransform(flat.dpr, 0, 0, flat.dpr, 0, 0);
     // Hotspots
     for (const p of pointList) {
-      const r = Math.max(1.8, pointRadius(p) * sc * 1.1);
+      const r = flatPointR(p);
       c.fillStyle = rgba(COLORS[p.dir], 0.85);
       c.beginPath(); c.arc(fx(p.lng, nearK(p.lng)), fy(p.lat), r, 0, 7); c.fill();
     }
@@ -1251,7 +1325,7 @@
       const g = arcGeom(a), steps = 24, tail = bez(g, t0), head = bez(g, t1);
       const grad = c.createLinearGradient(tail[0], tail[1], head[0], head[1]);
       grad.addColorStop(0, a.color[0]); grad.addColorStop(1, a.color[1]);
-      c.strokeStyle = grad; c.lineWidth = Math.max(1, a.stroke * 1.8);
+      c.strokeStyle = grad; c.lineWidth = Math.max(1, a.stroke * 1.8 * flat.zoom ** 0.15);
       c.beginPath(); c.moveTo(tail[0], tail[1]);
       for (let i = 1; i <= steps; i++) { const q = bez(g, t0 + (t1 - t0) * i / steps); c.lineTo(q[0], q[1]); }
       c.stroke();
@@ -1278,21 +1352,27 @@
   function flatHit(mx, my) {
     const sc = flatScale();
     for (const p of pointList) {
-      const r = Math.max(1.8, pointRadius(p) * sc * 1.1) + 3;
-      if (Math.hypot(fx(p.lng, nearK(p.lng)) - mx, fy(p.lat) - my) <= r) return { point: p };
+      if (Math.hypot(fx(p.lng, nearK(p.lng)) - mx, fy(p.lat) - my) <= flatPointR(p) + 3) return { point: p };
     }
-    if (!flat.paths) return null;
+    const paths = flatPaths();
+    if (!paths) return null;
     const c = flat.bg.getContext('2d'), d = flat.dpr;
     for (const k of [-1, 0, 1]) {
+      // nur Länder, deren Rahmen den Mauspunkt enthält
+      const lng = flat.lng - k * 360 + (mx - flat.w / 2) / sc, lat = flat.lat - (my - flat.h / 2) / sc;
+      if (lng < -180 || lng > 180) continue;
       c.setTransform(sc * d, 0, 0, -sc * d, fx(0, k) * d, fy(0) * d);
-      for (const { f, path } of flat.paths) if (c.isPointInPath(path, mx * d, my * d)) return { poly: f };
+      for (const { f, path, box } of paths) {
+        if (lng < box[0] || lng > box[2] || lat < box[1] || lat > box[3]) continue;
+        if (c.isPointInPath(path, mx * d, my * d)) return { poly: f };
+      }
     }
     return null;
   }
   function flatHover(ev) {
     const r = flatEl.getBoundingClientRect(), hit = flatHit(ev.clientX - r.left, ev.clientY - r.top);
     const poly = hit && hit.poly || null;
-    if (poly !== polyHover) { polyHover = poly; flatDirty = true; }
+    if (!sameCountry(poly, polyHover) && poly !== polyHover) { polyHover = poly; flatDirty = true; }
     flatEl.style.cursor = hit ? 'pointer' : '';
     if (!hit) { flatTip.hidden = true; return; }
     flatTip.innerHTML = hit.point ? pointLabel(hit.point) : polyLabel(hit.poly);   // Inhalt ist escaped
@@ -1333,14 +1413,14 @@
     ev.preventDefault();
     const r = flatEl.getBoundingClientRect(), mx = ev.clientX - r.left, my = ev.clientY - r.top;
     const sc0 = flatScale(), lng = flat.lng + (mx - flat.w / 2) / sc0, lat = flat.lat - (my - flat.h / 2) / sc0;
-    flat.zoom = Math.max(1, Math.min(16, flat.zoom * Math.exp(-ev.deltaY * 0.0015)));
+    flat.zoom = Math.max(1, Math.min(FLAT_MAX_ZOOM, flat.zoom * Math.exp(-ev.deltaY * 0.0015)));
     const sc = flatScale();   // Punkt unter dem Mauszeiger bleibt stehen
     flat.lng = lng - (mx - flat.w / 2) / sc; flat.lat = lat + (my - flat.h / 2) / sc;
     flat.anim = null; flatClamp(); flatDirty = true; flatTip.hidden = true;
   }, { passive: false });
 
   function flatFocus(lat, lng, zoom = Math.max(flat.zoom, 3), ms = 1000) {
-    const to = { lng: flat.lng + wrapLng(lng - flat.lng), lat, zoom };
+    const to = { lng: flat.lng + wrapLng(lng - flat.lng), lat, zoom: Math.min(FLAT_MAX_ZOOM, zoom) };
     flat.anim = { t0: Date.now(), ms: reduceMotion ? 1 : ms, from: { lng: flat.lng, lat: flat.lat, zoom: flat.zoom }, to };
     flatTip.hidden = true; if (polyHover) { polyHover = null; flatDirty = true; }
   }
