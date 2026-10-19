@@ -133,20 +133,22 @@
     world
       .atmosphereAltitude(0.16)
       .arcStartLat(d => d.sLat).arcStartLng(d => d.sLng).arcEndLat(d => d.eLat).arcEndLng(d => d.eLng)
-      .arcColor(d => d.color).arcStroke(d => d.stroke)
+      .arcColor(d => d.color).arcStroke(d => d.stroke * Math.max(0.25, globeNear.scale))
       .arcDashLength(d => d.dash).arcDashGap(d => d.gap).arcDashInitialGap(1).arcDashAnimateTime(CONFIG.flightMs)
       .arcsTransitionDuration(0)
       .ringColor(d => t => rgba(d.color, Math.max(0, 1 - t)))
-      .ringMaxRadius(d => d.max).ringPropagationSpeed(d => d.speed).ringRepeatPeriod(d => d.period)
+      .ringMaxRadius(d => d.max * globeNear.scale).ringPropagationSpeed(d => d.speed * globeNear.scale).ringRepeatPeriod(d => d.period)
       .pointLat(d => d.lat).pointLng(d => d.lng).pointColor(d => rgba(COLORS[d.dir], 0.85))
-      .pointAltitude(0.004).pointRadius(pointRadius)
+      .pointAltitude(0.004).pointRadius(d => pointRadius(d) * globeNear.scale)
       .pointsTransitionDuration(0)
       .pointLabel(pointLabel)
       .onPointClick(d => d.cc ? openDossier('country', d.cc) : null)
       .labelLat(d => d.lat).labelLng(d => d.lng).labelText(d => d.label)
       .labelColor(() => cssVar('--text') || '#dbe6f3')
       .labelSize(0.55).labelDotRadius(0.28).labelAltitude(0.006)
-      .pointOfView(homeView(), 0);
+      .pointOfView(homeView(), 0)
+      .tileLat(d => d.lat).tileLng(d => d.lng).tileWidth(d => d.w).tileHeight(d => d.h)
+      .tileAltitude(0.002).tileMaterial(globeTileMat).tilesTransitionDuration(0);
 
     try { world.renderer().setPixelRatio(lite ? 1 : Math.min(devicePixelRatio || 1, 2)); } catch {}
     rings.push(homeRing = { lat: H.lat, lng: H.lng, color: COLORS.out, max: 2.5, speed: 1, period: 2600 });
@@ -1082,6 +1084,11 @@
   const featureByIso = new Map();
   let polyHover = null, polySelected = null;
   let countryFeatures = [];
+  // Grenzen 1:50m für Nahansichten (Karte und Globus), erst bei Bedarf geladen
+  let detailGeo = null;
+  const loadDetailGeo = () => detailGeo || (detailGeo = fetch(CONFIG.textures + 'countries-50m.geojson')
+    .then(r => r.json()).then(g => g.features)
+    .catch(err => { console.warn('Detailgrenzen nicht geladen:', err); return null; }));
   async function initCountries() {
     if (lite) return;
     try {
@@ -1091,9 +1098,9 @@
       if (!world) return;
       world
         .polygonsData(geo.features)
-        .polygonAltitude(d => d === polyHover || d === polySelected ? 0.012 : 0.004)
+        .polygonAltitude(d => sameCountry(d, polyHover) || sameCountry(d, polySelected) ? 0.012 : 0.004)
         .polygonCapColor(polyColor)
-        .polygonSideColor(() => rgba(COLORS.out, 0.04))
+        .polygonSideMaterial(noSideMaterial)
         .polygonStrokeColor(polyStroke)
         .polygonsTransitionDuration(250)
         .polygonLabel(polyLabel)
@@ -1101,6 +1108,8 @@
         .onPolygonClick(d => { if (d.properties.iso) openDossier('country', d.properties.iso); });
     } catch (err) { console.warn('Länderflächen nicht geladen:', err); }
   }
+  let sideMat = null;
+  const noSideMaterial = () => sideMat || (sideMat = new (world.globeMaterial().constructor)({ visible: false }));
   function polyLabel(d) {
     const iso = d.properties.iso, s = countryStats.get(iso);
     const box = el('div');
@@ -1126,7 +1135,7 @@
   }
   function refreshPolys() {
     flatDirty = true;
-    if (world && featureByIso.size) world.polygonCapColor(polyColor).polygonStrokeColor(polyStroke).polygonSideColor(() => rgba(COLORS.out, 0.04)).polygonAltitude(world.polygonAltitude());
+    if (world && featureByIso.size) world.polygonCapColor(polyColor).polygonStrokeColor(polyStroke).polygonAltitude(world.polygonAltitude());
   }
   function focusCountry(iso) {
     const f = featureByIso.get(iso);
@@ -1206,9 +1215,7 @@
       if (detail.paths) return detail.paths;
       if (!detail.loading) {
         detail.loading = true;
-        fetch(CONFIG.textures + 'countries-50m.geojson').then(r => r.json())
-          .then(g => { detail.paths = buildPaths(g.features); flatDirty = true; })
-          .catch(err => console.warn('Detailgrenzen nicht geladen:', err));
+        loadDetailGeo().then(fs => { if (fs) { detail.paths = buildPaths(fs); flatDirty = true; } });
       }
     }
     if (!flat.paths && countryFeatures.length) flat.paths = buildPaths(countryFeatures);
@@ -1423,6 +1430,98 @@
     const to = { lng: flat.lng + wrapLng(lng - flat.lng), lat, zoom: Math.min(FLAT_MAX_ZOOM, zoom) };
     flat.anim = { t0: Date.now(), ms: reduceMotion ? 1 : ms, from: { lng: flat.lng, lat: flat.lat, zoom: flat.zoom }, to };
     flatTip.hidden = true; if (polyHover) { polyHover = null; flatDirty = true; }
+  }
+
+  // ---------- Globus: Nahansicht ----------
+  // Nah am Globus wären Punkte, Bögen und Beschriftung (in Grad bemessen) riesig und die Textur
+  // unscharf. Daher: Größen mit der Kamerahöhe skalieren, Grenzen auf 1:50m wechseln und über den
+  // sichtbaren Ausschnitt die Kacheln der flachen Karte (vendor/night/) legen.
+  const globeNear = { scale: 1, alt: -1, lat: 0, lng: 0, fine: false, region: null, tileKey: '', mats: new Map() };
+
+  function updateGlobeNear(force) {
+    if (!world || globeEl.hidden || document.hidden) return;
+    const pov = world.pointOfView(), N = globeNear;
+    const moved = force || Math.abs(pov.altitude - N.alt) > 0.01 || Math.abs(pov.lat - N.lat) > 0.5 || Math.abs(wrapLng(pov.lng - N.lng)) > 0.5;
+    if (moved) {
+      N.alt = pov.altitude; N.lat = pov.lat; N.lng = pov.lng;
+      // bei der Starthöhe 2,3 wie bisher, nah heran bis auf ein Achtel
+      const scale = Math.max(0.12, Math.min(1, pov.altitude / 1.8));
+      if (force || Math.abs(scale - N.scale) / N.scale > 0.1) {
+        N.scale = scale;
+        world.labelSize(0.55 * scale ** 0.75).labelDotRadius(0.28 * scale);
+        refreshPoints();
+      }
+      // Grenzen: unterhalb Höhe 0,9 fein, zurück erst über 1,1 (sonst Flackern an der Schwelle).
+      // Fein nur die Länder im großzügigen Blickfeld – jede Teilfläche kostet einen Draw-Call,
+      // alle 1:50m-Länder zusammen drücken die Bildrate auf wenige fps.
+      if (!lite && countryFeatures.length) {
+        const fine = pov.altitude < (N.fine ? 1.1 : 0.9), r = N.region;
+        if (fine && (!N.fine || !r || pov.altitude > r.alt * 1.3 || pov.altitude < r.alt / 1.3 ||
+            Math.abs(pov.lat - r.lat) > r.lat0 / 3 || Math.abs(wrapLng(pov.lng - r.lng)) > r.lng0 / 3)) {
+          const span = viewSpan(pov, 1.6), reg = N.region = { alt: pov.altitude, lat: pov.lat, lng: pov.lng, lat0: span.lat, lng0: span.lng };
+          loadDetailGeo().then(fs => { if (fs && N.region === reg) world.polygonsData(fs.filter(f => inRegion(featureBox(f), reg))); });
+        } else if (!fine && N.fine) { N.region = null; world.polygonsData(countryFeatures); }
+        N.fine = fine;
+      }
+    }
+    updateGlobeTiles(pov);
+  }
+  setInterval(() => updateGlobeNear(false), 250);
+
+  // grob sichtbarer Ausschnitt um den Blickpunkt (halbe Breite/Höhe in Grad), geschätzt nach Kamerahöhe
+  function viewSpan(pov, f = 1) {
+    const lat = Math.min(90, (8 + pov.altitude * 30) * f);
+    return { lat, lng: Math.min(180, (8 + pov.altitude * 50) * f / Math.max(0.2, Math.cos(pov.lat * Math.PI / 180))) };
+  }
+  const boxes = new WeakMap();
+  function featureBox(f) {
+    let b = boxes.get(f);
+    if (b) return b;
+    b = [180, 90, -180, -90];
+    const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
+    for (const poly of polys) for (const [x, y] of poly[0]) { if (x < b[0]) b[0] = x; if (y < b[1]) b[1] = y; if (x > b[2]) b[2] = x; if (y > b[3]) b[3] = y; }
+    boxes.set(f, b);
+    return b;
+  }
+  const inRegion = (b, r) => b[3] >= r.lat - r.lat0 && b[1] <= r.lat + r.lat0 &&
+    [-360, 0, 360].some(k => b[2] + k >= r.lng - r.lng0 && b[0] + k <= r.lng + r.lng0);
+
+  // Kacheln rund um den Blickpunkt; der Ausschnitt ist grob nach Kamerahöhe und Breite geschätzt
+  function updateGlobeTiles(pov) {
+    if (!nightMap) { const m = world.globeMaterial(); if (m.map) nightMap = m.map; }
+    const want = new Map();
+    if (settings.globeStyle !== 'plain' && !lite && nightMap && pov.altitude < 0.9) {
+      const z = pov.altitude < 0.45 ? 2 : 1, L = NIGHT[z], tw = 360 / L.cols, th = 180 / L.rows;
+      const { lat: spanLat, lng: spanLng } = viewSpan(pov);
+      const y0 = Math.max(0, Math.floor((90 - (pov.lat + spanLat)) / th)), y1 = Math.min(L.rows - 1, Math.floor((90 - (pov.lat - spanLat)) / th));
+      const xa = Math.floor((pov.lng - spanLng + 180) / tw), xb = Math.floor((pov.lng + spanLng + 180) / tw);
+      for (let y = y0; y <= y1; y++) for (let xi = xa; xi <= xb; xi++) {
+        const x = ((xi % L.cols) + L.cols) % L.cols, key = z + '/' + y + '-' + x;
+        want.set(key, { key, lat: 90 - (y + 0.5) * th, lng: -180 + (x + 0.5) * tw, w: tw, h: th });
+      }
+    }
+    const key = [...want.keys()].join(',');
+    if (key === globeNear.tileKey) return;
+    globeNear.tileKey = key;
+    world.tilesData([...want.values()]);
+  }
+  // Material je Kachel: Kopie der Globus-Textur mit eigenem Bild, unsichtbar bis es geladen ist
+  function globeTileMat(t) {
+    const mats = globeNear.mats;
+    let m = mats.get(t.key);
+    if (m) { mats.delete(t.key); mats.set(t.key, m); return m; }
+    // eigene Textur pro Kachel: clone() würde die Bildquelle mit der Globus-Textur teilen
+    m = new (world.globeMaterial().constructor)({ transparent: true, opacity: 0 });
+    const img = new Image();
+    img.onload = () => {
+      const tex = new nightMap.constructor(img);
+      tex.colorSpace = nightMap.colorSpace; tex.anisotropy = nightMap.anisotropy; tex.needsUpdate = true;
+      m.map = tex; m.transparent = false; m.opacity = 1; m.needsUpdate = true;
+    };
+    img.src = CONFIG.textures + 'night/' + t.key + '.jpg';
+    mats.set(t.key, m);
+    if (mats.size > 160) { const [k0, old] = mats.entries().next().value; mats.delete(k0); if (old.map) old.map.dispose(); old.dispose(); }
+    return m;
   }
 
   // ---------- Erstkontakt: Land oder Firma zum ersten Mal seit 30 Tagen ----------
