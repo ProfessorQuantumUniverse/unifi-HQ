@@ -1,6 +1,6 @@
 # Lagezentrum
 
-Live-Weltkarte für das Heimnetz: Jede Verbindung über den UniFi Cloud Gateway Max fliegt als
+Live-Weltkarte für das Heimnetz: Jede Verbindung über dein UniFi Gateway fliegt als
 Bogen über einen 3D-Globus. Dazu Live-Ticker, 24-h-Statistik und eine durchsuchbare Historie.
 
 - **Standardansicht:** erlaubte Verbindungen raus (cyan) und rein (grün)
@@ -56,7 +56,9 @@ Alle Container laufen mit schreibgeschütztem Dateisystem, ohne Linux-Capabiliti
 Antwort. Die Pipeline ordnet beide derselben Verbindung zu (`leg=req` / `leg=resp`). Live und in
 den Zählern erscheint nur die Anfrage; die Antwort zählt beim Datenvolumen mit (sonst fehlen
 alle Downloads). Über die WAN-Grenze gilt die lokale Seite als Client, außer ihr Port steht in
-`LOCAL_SERVER_PORTS` (z. B. WireGuard 51820) oder ist ein klassischer Server-Port unter 1024.
+`LOCAL_SERVER_PORTS` (z. B. WireGuard 51820) oder ist ein klassischer Server-Port unter 1024 –
+und die Gegenseite kommt nicht selbst von einem Dienst-Port (unter 1024 oder STUN/TURN). Sonst
+würde ein Client, der zufällig 51820 als Quellport zieht, als „rein“ erscheinen.
 
 ---
 

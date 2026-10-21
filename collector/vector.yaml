@@ -140,7 +140,11 @@ transforms:
         local = dst
         remote = src
         if src_local { lport = sp; rport = dp; local = src; remote = dst }
-        local_server = includes(server_ports, lport) || (lport != 0 && lport < 1024 && rport >= 1024)
+        # Clients wählen ihren Quellport zufällig aus 32768–65535 (Windows/macOS ab 49152) –
+        # dort liegt auch WireGuard 51820. Antwortet die Gegenseite von einem typischen
+        # Dienst-Port (unter 1024, STUN/TURN wie Teams oder Meet), ist die lokale Seite Client.
+        remote_service = rport != 0 && (rport < 1024 || (rport >= 3478 && rport <= 3481) || rport == 5349 || (rport >= 19302 && rport <= 19309))
+        local_server = !remote_service && (includes(server_ports, lport) || (lport != 0 && lport < 1024 && rport >= 1024))
         if local_server {
           dir = "in"; cport = rport; srvport = lport
           if src_local { leg = "resp" }
